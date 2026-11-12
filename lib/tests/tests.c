@@ -219,7 +219,8 @@ test_forest_matching(void)
     ret = tsls_hmm_alloc(&hmm, &index, rho, mu, DBL_MIN, TSLS_EXTENDED_CHECKS);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
 
-    ret = tsls_hmm_find_path(&hmm, 0, 4, h, match, &path_length, left, right, parent);
+    ret = tsls_hmm_find_path(
+        &hmm, 0, 4, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     CU_ASSERT_EQUAL(path_length, 1);
     CU_ASSERT_EQUAL(parent[0], 1);
@@ -233,21 +234,32 @@ test_forest_matching(void)
     tsls_hmm_print_state(&hmm, _devnull);
 
     /* A window within the right tree, which is found by seeking backwards */
-    ret = tsls_hmm_find_path(&hmm, 2, 4, h, match, &path_length, left, right, parent);
+    ret = tsls_hmm_find_path(
+        &hmm, 2, 4, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     CU_ASSERT_EQUAL(path_length, 1);
     CU_ASSERT_EQUAL(parent[0], 1);
     CU_ASSERT_EQUAL(left[0], 6);
     CU_ASSERT_EQUAL(right[0], 10);
 
-    ret = tsls_hmm_find_path(&hmm, 2, 1, h, match, &path_length, left, right, parent);
+    ret = tsls_hmm_find_path(
+        &hmm, 2, 1, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL(ret, TSLS_ERR_BAD_SITE_RANGE);
+
+    ret = tsls_hmm_find_path(
+        &hmm, 1, 4, 3, 1, h, match, &path_length, left, right, parent);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    CU_ASSERT_EQUAL(parent[0], 1);
+    CU_ASSERT_EQUAL(parent[path_length - 1], 3);
+    ret = tsls_hmm_find_path(
+        &hmm, 2, 4, 1, 1, h, match, &path_length, left, right, parent);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
 
     /* Viterbi with the values recorded */
     ret = compressed_matrix_alloc(&fm, 4, 1024);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
-    ret = tsls_hmm_find_path_matrix(
-        &hmm, 0, 4, h, match, &path_length, left, right, parent, &fm);
+    ret = tsls_hmm_find_path_matrix(&hmm, 0, 4, TSK_NULL, TSK_NULL, h, match,
+        &path_length, left, right, parent, &fm);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     CU_ASSERT_EQUAL(path_length, 1);
     CU_ASSERT_EQUAL(parent[0], 1);
@@ -315,11 +327,24 @@ test_bad_inputs(void)
     CU_ASSERT_EQUAL_FATAL(ret, 0);
 
     ret = tsls_hmm_find_path(
-        &hmm, 0, 4, bad_h, match, &path_length, left, right, parent);
+        &hmm, 0, 4, TSK_NULL, TSK_NULL, bad_h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL(ret, TSLS_ERR_BAD_HAPLOTYPE_ALLELE);
-    ret = tsls_hmm_find_path(
-        &hmm, 0, 4, impossible_h, match, &path_length, left, right, parent);
+    ret = tsls_hmm_find_path(&hmm, 0, 4, TSK_NULL, TSK_NULL, impossible_h, match,
+        &path_length, left, right, parent);
     CU_ASSERT_EQUAL(ret, TSLS_ERR_MATCH_IMPOSSIBLE_EXTREME_MUTATION_PROBA);
+
+    ret = tsls_hmm_find_path(
+        &hmm, 0, 4, -2, TSK_NULL, h, match, &path_length, left, right, parent);
+    CU_ASSERT_EQUAL(ret, TSLS_ERR_BAD_ENDPOINT);
+    ret = tsls_hmm_find_path(
+        &hmm, 0, 4, TSK_NULL, 7, h, match, &path_length, left, right, parent);
+    CU_ASSERT_EQUAL(ret, TSLS_ERR_BAD_ENDPOINT);
+    ret = tsls_hmm_find_path(
+        &hmm, 0, 4, 5, TSK_NULL, h, match, &path_length, left, right, parent);
+    CU_ASSERT_EQUAL(ret, TSLS_ERR_BAD_ENDPOINT);
+    ret = tsls_hmm_find_path(
+        &hmm, 0, 1, 1, 2, h, match, &path_length, left, right, parent);
+    CU_ASSERT_EQUAL(ret, TSLS_ERR_CONDITIONED_PATH);
 
     ret = compressed_matrix_alloc(&cm, 4, 1024);
     CU_ASSERT_EQUAL_FATAL(ret, 0);

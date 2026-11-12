@@ -304,12 +304,20 @@ class Hmm(_tsls.Hmm):
         self.ts = ts.ts
         super().__init__(ts, recombination=recombination, mismatch=mismatch, **kwargs)
 
-    def find_path(self, h, start, end, match_out):
+    def find_path(
+        self, h, start, end, match_out, *, initial_state=None, final_state=None
+    ):
         """
         Run the Viterbi algorithm on the haplotype h over sites [start, end),
         writing the matched haplotype into match_out, and return the
         (left, right, parent) arrays of the copying path, in right-to-left
         order. The matched haplotype is -1 (missing) outside [start, end).
+
+        Optional node IDs ``initial_state`` and ``final_state`` fix the copying
+        states at the first and last included sites. An internal node pins only
+        that node. Each call starts fresh likelihoods. Flooring and pruning keep
+        their configured approximation semantics; endpoint identities are hard
+        constraints. Failure to recover them raises ``MatchImpossible``.
 
         The path covers [x, y), where x is the position of site start (0 if
         start is 0) and y is the position of site end (the sequence length
@@ -318,7 +326,9 @@ class Hmm(_tsls.Hmm):
         paths, which one is returned is not specified, and can change
         between versions of tsls.
         """
-        path_len, left, right, parent, matched = super().find_path(h, start, end)
+        path_len, left, right, parent, matched = super().find_path(
+            h, start, end, initial_state=initial_state, final_state=final_state
+        )
         match_out[:] = matched
         return left[:path_len], right[:path_len], parent[:path_len]
 

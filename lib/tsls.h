@@ -231,6 +231,8 @@ typedef struct {
     double *stay_cost;
     /* The algorithm running (MODE_VITERBI etc. in hmm.c) */
     int mode;
+    tsk_id_t initial_state;
+    tsk_id_t final_state;
     /* The per-node state, including the tree's parent links */
     tsls_node_t *tree;
     tsls_likelihood_t *likelihood;
@@ -372,12 +374,13 @@ int tsls_hmm_free(tsls_hmm_t *self);
 double tsls_hmm_get_mean_num_values(const tsls_hmm_t *self);
 double tsls_hmm_get_mean_num_updated(const tsls_hmm_t *self);
 int tsls_hmm_find_path(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
-    const allele_t *haplotype, allele_t *matched_haplotype, size_t *path_length,
-    double *path_left, double *path_right, tsk_id_t *path_parent);
+    tsk_id_t initial_state, tsk_id_t final_state, const allele_t *haplotype,
+    allele_t *matched_haplotype, size_t *path_length, double *path_left,
+    double *path_right, tsk_id_t *path_parent);
 int tsls_hmm_find_path_matrix(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
-    const allele_t *haplotype, allele_t *matched_haplotype, size_t *path_length,
-    double *path_left, double *path_right, tsk_id_t *path_parent,
-    compressed_matrix_t *output);
+    tsk_id_t initial_state, tsk_id_t final_state, const allele_t *haplotype,
+    allele_t *matched_haplotype, size_t *path_length, double *path_left,
+    double *path_right, tsk_id_t *path_parent, compressed_matrix_t *output);
 int tsls_hmm_forward(
     tsls_hmm_t *self, const allele_t *haplotype, compressed_matrix_t *output);
 int tsls_hmm_backward(tsls_hmm_t *self, const allele_t *haplotype,

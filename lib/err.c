@@ -9,6 +9,11 @@ tsls_strerror(int err)
         case 0:
             ret = "Normal exit condition. This is not an error!";
             break;
+        case TSLS_ERR_BAD_ENDPOINT:
+            return "Endpoint must be a reference node present in its local tree";
+        case TSLS_ERR_CONDITIONED_PATH:
+            return "Cannot recover the constrained path under the supplied HMM "
+                   "parameters";
         case TSLS_ERR_GENERIC:
             ret = "Generic tsls error - please file a bug report.";
             break;

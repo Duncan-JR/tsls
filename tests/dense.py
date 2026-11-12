@@ -122,7 +122,9 @@ def backward(A, present, continuous, h, rho, mu, num_alleles, n, c, threshold=0)
     return B
 
 
-def viterbi_matrix(A, present, continuous, h, rho, mu, num_alleles, n):
+def viterbi_matrix(
+    A, present, continuous, h, rho, mu, num_alleles, n, initial_state=None
+):
     """
     Return the (V, c) tuple of Viterbi values normalised by the maximum at
     each site, and the maximum values c, where staying on a node has
@@ -133,9 +135,16 @@ def viterbi_matrix(A, present, continuous, h, rho, mu, num_alleles, n):
     V = np.zeros((m, N))
     c = np.zeros(m)
     v = present[0].astype(float)
+    if initial_state is not None:
+        v[:] = 0
+        v[initial_state] = 1
     for j in range(m):
         v = np.where(continuous[j], v, 0)
-        v = np.maximum(v * (1 - rho[j] + rho[j] / n), rho[j] / n)
+        if j > 0:
+            v = np.maximum(v * (1 - rho[j] + rho[j] / n), rho[j] / n)
+        elif initial_state is None:
+            # Preserve the ordinary unconditioned score convention.
+            v *= 1 - rho[j] + rho[j] / n
         v = np.where(
             present[j],
             v * emission(A[j], h[j], mu[j], site_num_alleles(num_alleles, j)),
@@ -147,25 +156,57 @@ def viterbi_matrix(A, present, continuous, h, rho, mu, num_alleles, n):
     return V, c
 
 
-def viterbi_log_likelihood(A, present, continuous, h, rho, mu, num_alleles, n):
+def viterbi_log_likelihood(
+    A,
+    present,
+    continuous,
+    h,
+    rho,
+    mu,
+    num_alleles,
+    n,
+    initial_state=None,
+    final_state=None,
+):
     """
     Return the log likelihood of the most likely path.
     """
-    _, c = viterbi_matrix(A, present, continuous, h, rho, mu, num_alleles, n)
-    return np.sum(np.log(c))
+    V, c = viterbi_matrix(
+        A, present, continuous, h, rho, mu, num_alleles, n, initial_state
+    )
+    terminal = 1 if final_state is None else V[-1, final_state]
+    return np.sum(np.log(c)) + np.log(terminal)
 
 
-def path_log_likelihood(A, present, continuous, h, rho, mu, num_alleles, n, path):
+def path_log_likelihood(
+    A,
+    present,
+    continuous,
+    h,
+    rho,
+    mu,
+    num_alleles,
+    n,
+    path,
+    initial_state=None,
+    final_state=None,
+):
     """
     Return the log likelihood of the specified path (the node copied at
     each site) under the same model as viterbi_log_likelihood. Copying the
     same node at consecutive sites counts as a switch if the node is not in
     the tree over the whole interval between them.
     """
+    if initial_state is not None:
+        assert path[0] == initial_state
+    if final_state is not None:
+        assert path[-1] == final_state
     log_likelihood = 0
     for j, u in enumerate(path):
         assert present[j, u]
-        if j == 0 or (path[j - 1] == u and continuous[j, u]):
+        if j == 0 and initial_state is not None:
+            p_t = 1
+        elif j == 0 or (path[j - 1] == u and continuous[j, u]):
             p_t = 1 - rho[j] + rho[j] / n
         else:
             p_t = rho[j] / n

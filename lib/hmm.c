@@ -81,16 +81,13 @@ count_trailing_zeros(uint64_t x)
  * with the same size. */
 #define HUGE_PAGE_SIZE ((size_t) 2 * 1024 * 1024)
 
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
 static inline bool
 tsls_large_alloc_uses_mmap(size_t size)
 {
-#if defined(__linux__) && defined(MADV_HUGEPAGE)
     return size >= HUGE_PAGE_SIZE / 2;
-#else
-    (void) size;
-    return false;
-#endif
 }
+#endif
 
 static void *
 tsls_large_alloc(size_t size)
@@ -128,6 +125,7 @@ tsls_large_alloc(size_t size)
 static void
 tsls_large_free(void *p, size_t size)
 {
+    (void) size;
     if (p == NULL) {
         return;
     }
@@ -1430,6 +1428,38 @@ out:
     return ret;
 }
 
+static int
+tsls_hmm_seed_initial_state(tsls_hmm_t *self)
+{
+    tsk_id_t u, initial = self->initial_state;
+
+    if (initial == NULL_NODE) {
+        return 0;
+    }
+    if (!tsls_hmm_in_tree(self, initial)) {
+        return TSLS_ERR_BAD_ENDPOINT;
+    }
+    for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
+        if (self->likelihood[u].value >= 0) {
+            self->likelihood[u].value = INFINITY;
+            self->likelihood[u].current = INFINITY;
+        }
+    }
+    if (self->likelihood[initial].value < 0) {
+        tsls_hmm_add_likelihood(self, initial, 0);
+    } else {
+        self->likelihood[initial].value = 0;
+    }
+    self->likelihood[initial].current = 0;
+    for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
+        if (self->tree[u].parent == initial) {
+            tsls_hmm_add_likelihood(self, u, INFINITY);
+            self->likelihood[u].current = INFINITY;
+        }
+    }
+    return 0;
+}
+
 static inline void
 tsls_hmm_set_allelic_state(tsls_hmm_t *self, const tsk_id_t site)
 {
@@ -1821,13 +1851,14 @@ tsls_hmm_push_ceiling(tsls_hmm_t *self, tsk_id_t site, double ceiling)
  * change (see below), so the values stored are not all exact. */
 static int WARN_UNUSED
 tsls_hmm_process_site_viterbi(tsls_hmm_t *self, const tsk_id_t site,
-    const allele_t state, bool skip_dead, compressed_matrix_t *output)
+    const allele_t state, bool initialise, bool skip_dead, compressed_matrix_t *output)
 {
     tsls_likelihood_t *restrict L = self->likelihood;
     int ret = 0;
     const tsk_id_t *restrict L_nodes = self->likelihood_nodes;
     tsls_node_t *restrict tree = self->tree;
-    const double ceiling = self->best_cost + self->switch_cost[site];
+    const double ceiling
+        = initialise ? INFINITY : self->best_cost + self->switch_cost[site];
     const double match_cost = self->match_cost[site];
     const double mismatch_cost = self->mismatch_cost[site];
     const allele_t ancestral_state = self->index->ancestral_state[site];
@@ -1855,7 +1886,7 @@ tsls_hmm_process_site_viterbi(tsls_hmm_t *self, const tsk_id_t site,
     for (j = 0; j < self->num_likelihood_nodes; j++) {
         u = L_nodes[j];
         cost = L[u].current;
-        flag[j] = cost >= ceiling;
+        flag[j] = !initialise && cost >= ceiling;
         cost = TSK_MIN(cost, ceiling);
         if (state == TSLS_MISSING_DATA) {
             cost += match_cost;
@@ -1898,7 +1929,7 @@ tsls_hmm_process_site_viterbi(tsls_hmm_t *self, const tsk_id_t site,
      * the cost of matching, which saves changing it at both sites. (Only
      * when the cap, floor, is at least dead, and matching is free.) */
     dead = INFINITY;
-    if (skip_dead && site + 1 < self->end_site && match_cost == 0
+    if (skip_dead && !initialise && site + 1 < self->end_site && match_cost == 0
         && self->switch_cost[site + 1] > 0) {
         dead = best + self->switch_cost[site + 1];
         if (!(dead <= floor)) {
@@ -1921,6 +1952,9 @@ tsls_hmm_process_site_viterbi(tsls_hmm_t *self, const tsk_id_t site,
             cost = floor;
         }
         cost = TSK_MIN(cost, floor);
+        if (initialise && self->initial_state != NULL_NODE && u != self->initial_state) {
+            cost = INFINITY;
+        }
         tree[u].recombination_required = flag[j];
         /* The state gives the cost as the cost it last changed to,
          * lowered by any smaller ceiling since (see tsls_hmm_run_traceback),
@@ -1939,7 +1973,10 @@ tsls_hmm_process_site_viterbi(tsls_hmm_t *self, const tsk_id_t site,
     tsls_hmm_coalesce_listed_likelihoods(self);
     if (output != NULL) {
         ret = compressed_matrix_store_costs(output, site,
-            exp(-((best - self->best_cost) + self->stay_cost[site]
+            exp(-((best - self->best_cost)
+                  + (initialise && self->initial_state != NULL_NODE
+                          ? 0
+                          : self->stay_cost[site])
                   + self->emission_base[site])),
             self->num_likelihood_nodes, L_nodes, L, tree, best);
         if (ret != 0) {
@@ -2737,6 +2774,12 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
     if (ret != 0) {
         goto out;
     }
+    if (mode == MODE_VITERBI) {
+        ret = tsls_hmm_seed_initial_state(self);
+        if (ret != 0) {
+            goto out;
+        }
+    }
     transition.pending = false;
     new_tree = true;
 
@@ -2749,6 +2792,11 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
             (void) valid;
             tsls_hmm_update_tree(self, &tp);
             new_tree = true;
+        }
+        if (mode == MODE_VITERBI && site == end - 1 && self->final_state != NULL_NODE
+            && !tsls_hmm_in_tree(self, self->final_state)) {
+            ret = TSLS_ERR_BAD_ENDPOINT;
+            goto out;
         }
         if (self->flags & TSLS_EXTENDED_CHECKS) {
             tsls_hmm_check_state(self);
@@ -2775,7 +2823,7 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
             self->delta_num_transition = self->delta_size;
             tsls_hmm_next_stamp(self);
             handled = 0;
-            if (self->tree_numbered) {
+            if (self->tree_numbered && site != start) {
                 handled = tsls_hmm_process_site_indexed(
                     self, site, haplotype[site], skip_dead);
             }
@@ -2786,7 +2834,7 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
                     tsls_hmm_refresh_currents(self);
                 }
                 ret = tsls_hmm_process_site_viterbi(
-                    self, site, haplotype[site], skip_dead, output);
+                    self, site, haplotype[site], site == start, skip_dead, output);
                 if (ret == 0 && self->tree_numbered) {
                     tsls_hmm_set_list_index(self);
                     self->num_prev_touched = 0;
@@ -2881,6 +2929,14 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
      * the output edges. */
     path_right[path_length] = end_pos;
     max_likelihood_node = self->max_likelihood_node[end - 1];
+    if (self->final_state != NULL_NODE) {
+        u = tsls_hmm_find_listed(self, self->final_state);
+        if (tsls_hmm_deferred_cost(self, L[u].value, L[u].site) == INFINITY) {
+            ret = TSLS_ERR_CONDITIONED_PATH;
+            goto out;
+        }
+        max_likelihood_node = self->final_state;
+    }
     assert(max_likelihood_node != NULL_NODE);
     path_parent[path_length] = max_likelihood_node;
 
@@ -2941,7 +2997,16 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
         recombine
             = L[u].value >= self->ceiling[site] && self->ceiling_pse[site] <= L[u].site;
         tsls_hmm_undo_traceback_entries(self, delta, 0, delta->num_transition, tree);
+        if (site == start && self->initial_state != NULL_NODE
+            && path_parent[path_length] != self->initial_state) {
+            ret = TSLS_ERR_CONDITIONED_PATH;
+            goto out;
+        }
         if (recombine && site > start) {
+            if (self->recombination_rate[site] == 0) {
+                ret = TSLS_ERR_CONDITIONED_PATH;
+                goto out;
+            }
             max_likelihood_node = self->max_likelihood_node[site - 1];
             assert(max_likelihood_node != NULL_NODE);
             path_left[path_length] = sites_position[site];
@@ -2956,7 +3021,10 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
          * roots of the first tree listed, at cost 0 */
         for (u = 0; u < virtual_root; u++) {
             assert(tree[u].traceback_flag == -1
-                   || (L[u].value == 0 && L[u].site == start - 1));
+                   || (L[u].site == start - 1
+                       && (L[u].value == 0
+                           || (self->initial_state != NULL_NODE
+                               && L[u].value == INFINITY))));
         }
     }
     path_left[path_length] = start_pos;
@@ -2996,9 +3064,9 @@ out:
  * likelihood (before normalisation) as the normalisation factor. */
 int
 tsls_hmm_find_path_matrix(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
-    const allele_t *haplotype, allele_t *matched_haplotype, size_t *path_length,
-    double *path_left, double *path_right, tsk_id_t *path_parent,
-    compressed_matrix_t *output)
+    tsk_id_t initial_state, tsk_id_t final_state, const allele_t *haplotype,
+    allele_t *matched_haplotype, size_t *path_length, double *path_left,
+    double *path_right, tsk_id_t *path_parent, compressed_matrix_t *output)
 {
     int ret = 0;
     bool valid_window = false;
@@ -3009,6 +3077,18 @@ tsls_hmm_find_path_matrix(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     }
     if (output != NULL && output->num_sites != self->num_sites) {
         ret = TSLS_ERR_BAD_SITE_RANGE;
+        goto out;
+    }
+    if (initial_state < NULL_NODE || initial_state >= (tsk_id_t) self->num_nodes
+        || final_state < NULL_NODE || final_state >= (tsk_id_t) self->num_nodes) {
+        ret = TSLS_ERR_BAD_ENDPOINT;
+        goto out;
+    }
+    self->initial_state = initial_state;
+    self->final_state = final_state;
+    if (end - start == 1 && initial_state != NULL_NODE && final_state != NULL_NODE
+        && initial_state != final_state) {
+        ret = TSLS_ERR_CONDITIONED_PATH;
         goto out;
     }
     valid_window = true;
@@ -3037,11 +3117,13 @@ out:
 
 int
 tsls_hmm_find_path(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
-    const allele_t *haplotype, allele_t *matched_haplotype, size_t *path_length,
-    double *path_left, double *path_right, tsk_id_t *path_parent)
+    tsk_id_t initial_state, tsk_id_t final_state, const allele_t *haplotype,
+    allele_t *matched_haplotype, size_t *path_length, double *path_left,
+    double *path_right, tsk_id_t *path_parent)
 {
-    return tsls_hmm_find_path_matrix(self, start, end, haplotype, matched_haplotype,
-        path_length, path_left, path_right, path_parent, NULL);
+    return tsls_hmm_find_path_matrix(self, start, end, initial_state, final_state,
+        haplotype, matched_haplotype, path_length, path_left, path_right, path_parent,
+        NULL);
 }
 
 int

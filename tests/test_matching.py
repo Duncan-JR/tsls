@@ -510,6 +510,63 @@ class TestViterbiPaths:
 
 
 class TestInterface:
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            {},
+            {
+                "likelihood_threshold": 1e-12,
+                "prune_threshold": 1e-8,
+                "relative_prune_threshold": 1e-9,
+            },
+        ],
+    )
+    def test_conditioned_parameters(self, settings):
+        ts = single_tree_ts()
+        hmm = tsls.Hmm(ts, np.full(4, 0.1), np.full(4, 0.02), **settings)
+        h = np.zeros(4, dtype=np.int8)
+        out = np.empty(4, dtype=np.int8)
+        path = hmm.find_path(h, 0, 4, out, initial_state=4, final_state=2)
+        donors = path_by_site(ts, *path)
+        assert donors[0] == 4
+        assert donors[-1] == 2
+
+    @pytest.mark.parametrize("pins", [{"initial_state": -2}, {"final_state": 8}])
+    def test_invalid_endpoint_id(self, pins):
+        ts = single_tree_ts()
+        hmm, _ = make_matcher(ts, 0.1, 0.02)
+        h = np.zeros(4, dtype=np.int8)
+        with pytest.raises(ValueError, match="Endpoint"):
+            hmm.find_path(h, 0, 4, h.copy(), **pins)
+
+    def test_absent_endpoint(self):
+        ts = gap_ts()
+        hmm, _ = make_matcher(ts, 0.1, 0.02)
+        h = np.zeros(4, dtype=np.int8)
+        with pytest.raises(ValueError, match="Endpoint"):
+            hmm.find_path(h, 0, 4, h.copy(), initial_state=4)
+        with pytest.raises(ValueError, match="Endpoint"):
+            hmm.find_path(h, 0, 4, h.copy(), final_state=4)
+
+    def test_conflicting_one_site_pins(self):
+        ts = single_tree_ts()
+        hmm, _ = make_matcher(ts, 0.1, 0.02)
+        h = np.zeros(4, dtype=np.int8)
+        with pytest.raises(tsls.MatchImpossible, match="supplied HMM parameters"):
+            hmm.find_path(h, 1, 2, h.copy(), initial_state=4, final_state=2)
+
+    def test_zero_recombination_and_recovery(self):
+        ts = single_tree_ts()
+        hmm, _ = make_matcher(ts, 0, 0.02, likelihood_threshold=0)
+        h = np.zeros(4, dtype=np.int8)
+        out = np.empty(4, dtype=np.int8)
+        path = hmm.find_path(h, 0, 4, out, initial_state=4, final_state=4)
+        np.testing.assert_array_equal(path_by_site(ts, *path), 4)
+        with pytest.raises(tsls.MatchImpossible):
+            hmm.find_path(h, 0, 4, out, initial_state=4, final_state=2)
+        path = hmm.find_path(h, 0, 4, out, initial_state=2, final_state=2)
+        np.testing.assert_array_equal(path_by_site(ts, *path), 2)
+
     def test_unknown_allele(self):
         ts = single_tree_ts()
         m = ts.num_sites
@@ -1733,3 +1790,69 @@ def test_match_outside_window_is_missing():
     _, matched, _ = am.viterbi_matrix(np.zeros(m, dtype=np.int8), 1, 3)
     assert np.all(matched[:1] == -1)
     assert np.all(matched[3:] == -1)
+
+
+class TestConditioning:
+    @pytest.fixture
+    def panel(self):
+        return single_tree_ts()
+
+    @pytest.mark.parametrize(
+        ("initial", "final"), [(None, None), (4, None), (None, 2), (4, 3)]
+    )
+    def test_constrained_optimum(self, panel, initial, final):
+        A, present, continuous = dense.node_states(panel, ALLELES)
+        h = np.array([3, 1, 0, 2], dtype=np.int8)
+        rho = np.full(panel.num_sites, 0.1)
+        mu = np.full(panel.num_sites, 0.02)
+        hmm, n = make_matcher(panel, 0.1, 0.02, likelihood_threshold=0)
+        out = np.empty(panel.num_sites, dtype=np.int8)
+        path = hmm.find_path(
+            h, 0, panel.num_sites, out, initial_state=initial, final_state=final
+        )
+        donors = path_by_site(panel, *path)
+        expected = dense.viterbi_log_likelihood(
+            A, present, continuous, h, rho, mu, len(ALLELES), n, initial, final
+        )
+        observed = dense.path_log_likelihood(
+            A, present, continuous, h, rho, mu, len(ALLELES), n, donors, initial, final
+        )
+        assert observed == pytest.approx(expected)
+        np.testing.assert_array_equal(out, A[np.arange(panel.num_sites), donors])
+
+    def test_sparse_conditioning(self, panel):
+        A, present, continuous = dense.node_states(panel, ALLELES)
+        h = A[:, 4].copy()
+        scores = []
+        for sparse in [False, True]:
+            hmm = tsls.Hmm(
+                panel,
+                np.full(4, 0.1),
+                np.full(4, 0.02),
+                alleles=ALLELES,
+                likelihood_threshold=0,
+                sparse=sparse,
+                index_min_sites=1,
+                extended_checks=True,
+            )
+            out = np.empty(4, dtype=np.int8)
+            path = hmm.find_path(h, 0, 4, out, initial_state=4, final_state=4)
+            donors = path_by_site(panel, *path)
+            scores.append(
+                dense.path_log_likelihood(
+                    A,
+                    present,
+                    continuous,
+                    h,
+                    np.full(4, 0.1),
+                    np.full(4, 0.02),
+                    len(ALLELES),
+                    panel.num_nodes,
+                    donors,
+                    4,
+                    4,
+                )
+            )
+            if sparse:
+                assert hmm.num_sparse_sites > 0
+        assert scores[0] == pytest.approx(scores[1])

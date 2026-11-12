@@ -14,6 +14,8 @@
 #define TSLS_ERR_BAD_NORMALISATION_FACTOR                   -10
 #define TSLS_ERR_BAD_PRUNING                                -11
 #define TSLS_ERR_BAD_PARAM_VALUE                            -12
+#define TSLS_ERR_BAD_ENDPOINT                              -14
+#define TSLS_ERR_CONDITIONED_PATH                            -15
 #define TSLS_ERR_DUPLICATE_ALLELE                           -13
 // clang-format on
 

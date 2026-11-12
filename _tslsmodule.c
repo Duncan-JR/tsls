@@ -39,7 +39,7 @@ handle_library_error(int err)
 {
     if (err == TSLS_ERR_NO_MEMORY) {
         PyErr_NoMemory();
-    } else if (err == TSLS_ERR_MATCH_IMPOSSIBLE
+    } else if (err == TSLS_ERR_MATCH_IMPOSSIBLE || err == TSLS_ERR_CONDITIONED_PATH
                || err == TSLS_ERR_MATCH_IMPOSSIBLE_EXTREME_MUTATION_PROBA
                || err == TSLS_ERR_MATCH_IMPOSSIBLE_ZERO_RECOMB_PRECISION) {
         PyErr_Format(TslsMatchImpossible, "%s", tsls_strerror(err));
@@ -47,7 +47,7 @@ handle_library_error(int err)
                || err == TSLS_ERR_TOO_MANY_ALLELES || err == TSLS_ERR_DUPLICATE_ALLELE
                || err == TSLS_ERR_BAD_SITE_RANGE
                || err == TSLS_ERR_BAD_NORMALISATION_FACTOR || err == TSLS_ERR_BAD_PRUNING
-               || err == TSLS_ERR_BAD_PARAM_VALUE) {
+               || err == TSLS_ERR_BAD_PARAM_VALUE || err == TSLS_ERR_BAD_ENDPOINT) {
         /* Errors in the inputs */
         PyErr_Format(PyExc_ValueError, "%s", tsls_strerror(err));
     } else {
@@ -399,7 +399,10 @@ Hmm_find_path(Hmm *self, PyObject *args, PyObject *kwds)
 {
     int err;
     PyObject *ret = NULL;
-    static char *kwlist[] = { "haplotype", "start", "end", NULL };
+    static char *kwlist[]
+        = { "haplotype", "start", "end", "initial_state", "final_state", NULL };
+    PyObject *initial = Py_None, *final = Py_None;
+    long initial_state = TSK_NULL, final_state = TSK_NULL;
     PyObject *haplotype = NULL;
     PyArrayObject *haplotype_array = NULL;
     npy_intp *shape;
@@ -415,7 +418,26 @@ Hmm_find_path(Hmm *self, PyObject *args, PyObject *kwds)
         goto out;
     }
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwds, "Oii", kwlist, &haplotype, &start, &end)) {
+            args, kwds, "Oii|$OO", kwlist, &haplotype, &start, &end, &initial, &final)) {
+        goto out;
+    }
+    if (initial != Py_None) {
+        initial_state = PyLong_AsLong(initial);
+        if (PyErr_Occurred()) {
+            goto out;
+        }
+    }
+    if (final != Py_None) {
+        final_state = PyLong_AsLong(final);
+        if (PyErr_Occurred()) {
+            goto out;
+        }
+    }
+    if ((initial != Py_None
+            && (initial_state < 0 || initial_state >= (long) self->hmm->num_nodes))
+        || (final != Py_None
+            && (final_state < 0 || final_state >= (long) self->hmm->num_nodes))) {
+        handle_library_error(TSLS_ERR_BAD_ENDPOINT);
         goto out;
     }
     haplotype_array
@@ -446,6 +468,7 @@ Hmm_find_path(Hmm *self, PyObject *args, PyObject *kwds)
 
     Py_BEGIN_ALLOW_THREADS
     err = tsls_hmm_find_path(self->hmm, (tsk_id_t) start, (tsk_id_t) end,
+        (tsk_id_t) initial_state, (tsk_id_t) final_state,
         (allele_t *) PyArray_DATA(haplotype_array), (allele_t *) PyArray_DATA(match),
         &num_edges, PyArray_DATA(left), PyArray_DATA(right), PyArray_DATA(parent));
     Py_END_ALLOW_THREADS
@@ -668,8 +691,9 @@ Hmm_viterbi_matrix(Hmm *self, PyObject *args, PyObject *kwds)
     }
     Py_BEGIN_ALLOW_THREADS
     err = tsls_hmm_find_path_matrix(self->hmm, (tsk_id_t) start, (tsk_id_t) end,
-        (allele_t *) PyArray_DATA(haplotype_array), (allele_t *) PyArray_DATA(match),
-        &num_edges, PyArray_DATA(left), PyArray_DATA(right), PyArray_DATA(parent), &cm);
+        TSK_NULL, TSK_NULL, (allele_t *) PyArray_DATA(haplotype_array),
+        (allele_t *) PyArray_DATA(match), &num_edges, PyArray_DATA(left),
+        PyArray_DATA(right), PyArray_DATA(parent), &cm);
     Py_END_ALLOW_THREADS
     if (err != 0) {
         handle_library_error(err);
