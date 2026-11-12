@@ -1525,9 +1525,6 @@ tsls_hmm_unset_allelic_state(tsls_hmm_t *self, const tsk_id_t site)
     }
 }
 
-/* As tsls_hmm_unset_allelic_state, for the traceback, which doesn't mark
- * the roots. */
-
 /* Make sure that every node with a mutation at this site that is in the
  * tree has its own likelihood. */
 static void
@@ -2909,8 +2906,9 @@ tsls_hmm_undo_traceback_entries(tsls_hmm_t *self, const traceback_delta_t *delta
 }
 
 /* Run the traceback over sites [start, end), moving right-to-left through
- * the trees. Only the parent array of the tree is needed. The state starts
- * as the forward pass left it, after the last site, and each site's delta
+ * the trees. Parent links and child counts are maintained on the retained
+ * cursor. The state starts as the forward pass left it, after the last site,
+ * and each site's delta
  * is undone after it is processed, so that the state ends as it was before
  * the first site.
  *
@@ -3023,7 +3021,7 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     }
     if (self->flags & TSLS_EXTENDED_CHECKS) {
         /* Undoing every site leaves the state before the first: only the
-         * roots of the first tree listed, at cost 0 */
+         * roots listed at cost 0, or the compressed initial point mass. */
         for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
             assert(tree[u].traceback_flag == -1
                    || (L[u].site == start - 1

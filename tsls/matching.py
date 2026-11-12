@@ -305,13 +305,24 @@ class Hmm(_tsls.Hmm):
         super().__init__(ts, recombination=recombination, mismatch=mismatch, **kwargs)
 
     def find_path(
-        self, h, start, end, match_out, *, initial_state=None, final_state=None
+        self,
+        h,
+        start,
+        end,
+        match_out,
+        *,
+        initial_state=None,
+        final_state=None,
+        preserve_outside=False,
     ):
         """
         Run the Viterbi algorithm on the haplotype h over sites [start, end),
         writing the matched haplotype into match_out, and return the
         (left, right, parent) arrays of the copying path, in right-to-left
-        order. The matched haplotype is -1 (missing) outside [start, end).
+        order. By default the matched haplotype is -1 (missing) outside
+        [start, end). With ``preserve_outside=True`` only the window is written
+        directly into the caller's writable contiguous reference-length int8
+        array; outside values survive and no full-length output copy is made.
 
         Optional node IDs ``initial_state`` and ``final_state`` fix the copying
         states at the first and last included sites. An internal node pins only
@@ -327,9 +338,16 @@ class Hmm(_tsls.Hmm):
         between versions of tsls.
         """
         path_len, left, right, parent, matched = super().find_path(
-            h, start, end, initial_state=initial_state, final_state=final_state
+            h,
+            start,
+            end,
+            initial_state=initial_state,
+            final_state=final_state,
+            match_out=match_out if preserve_outside else None,
+            preserve_outside=preserve_outside,
         )
-        match_out[:] = matched
+        if not preserve_outside:
+            match_out[:] = matched
         return left[:path_len], right[:path_len], parent[:path_len]
 
     def viterbi_matrix(self, h, start=0, end=None):

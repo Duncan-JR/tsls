@@ -399,9 +399,11 @@ Hmm_find_path(Hmm *self, PyObject *args, PyObject *kwds)
 {
     int err;
     PyObject *ret = NULL;
-    static char *kwlist[]
-        = { "haplotype", "start", "end", "initial_state", "final_state", NULL };
+    static char *kwlist[] = { "haplotype", "start", "end", "initial_state",
+        "final_state", "match_out", "preserve_outside", NULL };
     PyObject *initial = Py_None, *final = Py_None;
+    PyObject *match_out = Py_None;
+    int preserve_outside = 0;
     long initial_state = TSK_NULL, final_state = TSK_NULL;
     PyObject *haplotype = NULL;
     PyArrayObject *haplotype_array = NULL;
@@ -417,8 +419,12 @@ Hmm_find_path(Hmm *self, PyObject *args, PyObject *kwds)
     if (Hmm_check_state(self) != 0) {
         goto out;
     }
-    if (!PyArg_ParseTupleAndKeywords(
-            args, kwds, "Oii|$OO", kwlist, &haplotype, &start, &end, &initial, &final)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Oii|$OOOp", kwlist, &haplotype, &start,
+            &end, &initial, &final, &match_out, &preserve_outside)) {
+        goto out;
+    }
+    if (start < 0 || end > (int) self->hmm->num_sites || start >= end) {
+        handle_library_error(TSLS_ERR_BAD_SITE_RANGE);
         goto out;
     }
     if (initial != Py_None) {
@@ -455,16 +461,42 @@ Hmm_find_path(Hmm *self, PyObject *args, PyObject *kwds)
         goto out;
     }
 
-    dims[0] = self->hmm->num_sites;
+    if (match_out != Py_None) {
+        if (!PyArray_Check(match_out)) {
+            PyErr_SetString(
+                PyExc_ValueError, "match_out must be a writable contiguous int8 array");
+            goto out;
+        }
+        match = (PyArrayObject *) match_out;
+        Py_INCREF(match);
+        if (PyArray_NDIM(match) != 1 || PyArray_TYPE(match) != NPY_INT8
+            || PyArray_DIM(match, 0) != (npy_intp) self->hmm->num_sites
+            || !PyArray_ISCARRAY(match)) {
+            PyErr_SetString(PyExc_ValueError,
+                "match_out must be a writable contiguous reference-length int8 array");
+            goto out;
+        }
+    } else {
+        if (preserve_outside) {
+            PyErr_SetString(PyExc_ValueError, "preserve_outside requires match_out");
+            goto out;
+        }
+        dims[0] = (npy_intp) self->hmm->num_sites;
+        match = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT8);
+        if (match == NULL) {
+            goto out;
+        }
+    }
+    if (!preserve_outside) {
+        memset(PyArray_DATA(match), 0xff, self->hmm->num_sites);
+    }
+    dims[0] = end - start;
     left = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_FLOAT64);
     right = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_FLOAT64);
     parent = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT32);
-    match = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT8);
-    if (left == NULL || right == NULL || parent == NULL || match == NULL) {
+    if (left == NULL || right == NULL || parent == NULL) {
         goto out;
     }
-    /* Sites outside [start, end) aren't matched, and are missing data */
-    memset(PyArray_DATA(match), 0xff, (size_t) dims[0]);
 
     Py_BEGIN_ALLOW_THREADS
     err = tsls_hmm_find_path(self->hmm, (tsk_id_t) start, (tsk_id_t) end,

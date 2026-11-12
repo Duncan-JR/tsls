@@ -567,6 +567,48 @@ class TestInterface:
         path = hmm.find_path(h, 0, 4, out, initial_state=2, final_state=2)
         np.testing.assert_array_equal(path_by_site(ts, *path), 2)
 
+    @pytest.mark.parametrize(("start", "end"), [(1, 3), (2, 3)])
+    def test_preserve_outside(self, start, end):
+        ts = single_tree_ts()
+        hmm, _ = make_matcher(ts, 0.1, 0.02)
+        h = np.zeros(4, dtype=np.int8)
+        expected = np.empty(4, dtype=np.int8)
+        default_path = hmm.find_path(h, start, end, expected)
+        out = np.full(4, -9, dtype=np.int8)
+        path = hmm.find_path(h, start, end, out, preserve_outside=True)
+        np.testing.assert_array_equal(out[:start], -9)
+        np.testing.assert_array_equal(out[end:], -9)
+        np.testing.assert_array_equal(out[start:end], expected[start:end])
+        A, _, _ = dense.node_states(ts, ALLELES)
+        donors = path_by_site(ts, *path, start, end)
+        np.testing.assert_array_equal(out[start:end], A[np.arange(start, end), donors])
+        for actual, wanted in zip(path, default_path):
+            np.testing.assert_array_equal(actual, wanted)
+            assert actual.base.shape == (end - start,)
+
+    @pytest.mark.parametrize(
+        "kind", ["length", "dtype", "readonly", "strided", "dimension", "list"]
+    )
+    def test_invalid_regional_output(self, kind):
+        ts = single_tree_ts()
+        hmm, _ = make_matcher(ts, 0.1, 0.02)
+        h = np.zeros(4, dtype=np.int8)
+        if kind == "length":
+            out = np.empty(3, dtype=np.int8)
+        elif kind == "dtype":
+            out = np.empty(4, dtype=np.int32)
+        elif kind == "readonly":
+            out = np.empty(4, dtype=np.int8)
+            out.flags.writeable = False
+        elif kind == "strided":
+            out = np.empty(8, dtype=np.int8)[::2]
+        elif kind == "dimension":
+            out = np.empty((1, 4), dtype=np.int8)
+        else:
+            out = [0] * 4
+        with pytest.raises(ValueError, match="match_out"):
+            hmm.find_path(h, 1, 3, out, preserve_outside=True)
+
     def test_unknown_allele(self):
         ts = single_tree_ts()
         m = ts.num_sites
