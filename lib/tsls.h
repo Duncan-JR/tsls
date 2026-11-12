@@ -233,6 +233,9 @@ typedef struct {
     int mode;
     tsk_id_t initial_state;
     tsk_id_t final_state;
+    /* The cursor and topology survive independent regional calls. */
+    tsk_tree_position_t tree_position;
+    bool topology_valid;
     /* The per-node state, including the tree's parent links */
     tsls_node_t *tree;
     tsls_likelihood_t *likelihood;

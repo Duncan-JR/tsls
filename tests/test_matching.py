@@ -1856,3 +1856,41 @@ class TestConditioning:
             if sparse:
                 assert hmm.num_sparse_sites > 0
         assert scores[0] == pytest.approx(scores[1])
+
+
+class TestRegionalReuse:
+    @pytest.fixture
+    def panel(self):
+        return gap_ts()
+
+    def test_independent_ordered_windows(self, panel):
+        A, _, _ = dense.node_states(panel, ALLELES)
+        rho = np.full(4, 0.1)
+        mu = np.full(4, 0.02)
+        shared = tsls.TreeSequence(panel, alleles=ALLELES)
+        reused = tsls.Hmm(shared, rho, mu, extended_checks=True, index_min_sites=1)
+        windows = [
+            (0, 1, 3, 3),
+            (0, 3, 3, 1),
+            (1, 4, None, 3),
+            (2, 4, 3, None),
+            (0, 2, None, 0),
+        ]
+        for h in [A[:, 0].copy(), A[:, 2].copy()]:
+            for start, end, initial, final in windows:
+                fresh = tsls.Hmm(
+                    shared, rho, mu, extended_checks=True, index_min_sites=1
+                )
+                actual = np.empty(4, dtype=np.int8)
+                expected = np.empty(4, dtype=np.int8)
+                pins = {"initial_state": initial, "final_state": final}
+                path = reused.find_path(h, start, end, actual, **pins)
+                wanted = fresh.find_path(h, start, end, expected, **pins)
+                np.testing.assert_array_equal(actual, expected)
+                np.testing.assert_array_equal(
+                    path_by_site(panel, *path, start, end),
+                    path_by_site(panel, *wanted, start, end),
+                )
+            # Other HMM operations invalidate the retained Viterbi topology.
+            forward = reused.forward_matrix(h)
+            reused.backward_matrix(h, forward.normalisation_factor)

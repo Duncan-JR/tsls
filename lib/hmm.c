@@ -847,6 +847,7 @@ tsls_hmm_alloc(tsls_hmm_t *self, const tsls_index_t *index,
     self->index_min_sites = 16;
     self->index = index;
     self->tree_sequence = index->tree_sequence;
+    tsk_tree_position_init(&self->tree_position, self->tree_sequence, 0);
     self->num_sites = index->num_sites;
     self->num_nodes = N;
     self->sites_position = index->sites_position;
@@ -937,6 +938,7 @@ out:
 int
 tsls_hmm_free(tsls_hmm_t *self)
 {
+    tsk_tree_position_free(&self->tree_position);
     tsls_safe_free(self->recombination_rate);
     tsls_safe_free(self->mismatch_rate);
     tsls_large_free_array(self->tree, self->num_nodes);
@@ -1375,46 +1377,78 @@ tsls_hmm_update_tree(tsls_hmm_t *self, const tsk_tree_position_t *tp)
 
 static void tsls_hmm_clear_numbering(tsls_hmm_t *self);
 
-/* Reset the HMM and build the tree containing the specified position,
- * giving each root the specified initial likelihood. The tree position must
- * be null. */
+/* Position only the topology. Skipped spans have no observations, rates,
+ * likelihood updates or traceback entries. Earlier trees use the cold path. */
+static int
+tsls_hmm_position_tree(tsls_hmm_t *self, tsk_tree_position_t *tp, double position)
+{
+    const tsls_edge_t *in, *out;
+    tsk_id_t j, u;
+    int ret;
+    bool valid;
+
+    if (self->topology_valid && position >= tp->interval.left) {
+        while (position >= tp->interval.right) {
+            valid = tsk_tree_position_next(tp);
+            assert(valid);
+            (void) valid;
+            out = tsls_index_get_edges(self->index, tp->out.order);
+            in = tsls_index_get_edges(self->index, tp->in.order);
+            for (j = tp->out.start; j != tp->out.stop; j++) {
+                tsls_hmm_remove_edge(
+                    self, out[j].parent, out[j].child, false, NULL, NULL);
+            }
+            for (j = tp->in.start; j != tp->in.stop; j++) {
+                tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false);
+            }
+        }
+    } else {
+        tsk_tree_position_free(tp);
+        tsk_tree_position_init(tp, self->tree_sequence, 0);
+        memset(self->num_children, 0, self->num_nodes * sizeof(*self->num_children));
+        for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
+            self->tree[u].parent = NULL_NODE;
+            self->tree[u].allelic_state = ROOT_ALLELE;
+            self->num_below[u] = 1;
+        }
+        ret = seek_tree_position(tp, position);
+        if (ret != 0) {
+            return ret;
+        }
+        in = tsls_index_get_edges(self->index, tp->in.order);
+        for (j = tp->in.start; j != tp->in.stop; j += tp->direction) {
+            if (seek_edge_covers(tp, &in[j], position)) {
+                tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false);
+            }
+        }
+    }
+    self->topology_valid = self->mode == MODE_VITERBI;
+    return 0;
+}
+
+/* Reset all probabilistic and walk state, retaining only topology. */
 static int WARN_UNUSED
 tsls_hmm_init_sweep(
     tsls_hmm_t *self, tsk_tree_position_t *tp, double position, double initial_value)
 {
-    int ret = 0;
-    const size_t N = self->num_nodes;
-    const tsls_edge_t *restrict in;
-    tsk_id_t u, j;
-    size_t k;
+    int ret;
+    tsk_id_t u;
 
-    memset(self->num_children, 0, N * sizeof(*self->num_children));
-    for (k = 0; k < N; k++) {
-        /* Every node starts as a root. The likelihoods are set below. */
-        self->tree[k].cache_stamp = 0;
-        self->tree[k].parent = NULL_NODE;
-        self->tree[k].allelic_state = ROOT_ALLELE;
-        self->tree[k].recombination_required = -1;
-        self->tree[k].traceback_flag = -1;
-        self->num_below[k] = 1;
-        /* In Viterbi, every value is as of the site before the first */
-        self->likelihood[k].site = self->last_site;
-    }
-    self->cache_stamp = 1;
-    tsls_hmm_clear_numbering(self);
-    self->currents_stale = false;
-    ret = seek_tree_position(tp, position);
+    ret = tsls_hmm_position_tree(self, tp, position);
     if (ret != 0) {
-        goto out;
+        return ret;
     }
-    in = tsls_index_get_edges(self->index, tp->in.order);
-    for (j = tp->in.start; j != tp->in.stop; j += tp->direction) {
-        if (seek_edge_covers(tp, &in[j], position)) {
-            tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false);
-        }
-    }
+    tsls_hmm_clear_numbering(self);
+    self->cache_stamp = 1;
+    self->currents_stale = false;
     self->num_likelihood_nodes = 0;
-    for (u = 0; u < (tsk_id_t) N; u++) {
+    for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
+        self->tree[u].cache_stamp = 0;
+        self->tree[u].allelic_state
+            = self->tree[u].parent == NULL_NODE ? ROOT_ALLELE : TSK_NULL;
+        self->tree[u].recombination_required = -1;
+        self->tree[u].traceback_flag = -1;
+        self->likelihood[u].site = self->last_site;
         if (self->tree[u].parent != NULL_NODE) {
             self->likelihood[u].value = NULL_LIKELIHOOD;
         } else if (self->num_children[u] > 0) {
@@ -1424,8 +1458,7 @@ tsls_hmm_init_sweep(
             self->likelihood[u].value = NOT_IN_TREE;
         }
     }
-out:
-    return ret;
+    return 0;
 }
 
 static int
@@ -1494,18 +1527,6 @@ tsls_hmm_unset_allelic_state(tsls_hmm_t *self, const tsk_id_t site)
 
 /* As tsls_hmm_unset_allelic_state, for the traceback, which doesn't mark
  * the roots. */
-static inline void
-tsls_hmm_clear_allelic_state(tsls_hmm_t *self, const tsk_id_t site)
-{
-    const tsls_index_t *index = self->index;
-    const tsk_id_t *restrict node = index->mutation_node;
-    const tsk_size_t stop = index->site_mutations_offset[site + 1];
-    tsk_size_t j;
-
-    for (j = index->site_mutations_offset[site]; j < stop; j++) {
-        self->tree[node[j]].allelic_state = TSK_NULL;
-    }
-}
 
 /* Make sure that every node with a mutation at this site that is in the
  * tree has its own likelihood. */
@@ -2722,7 +2743,7 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
     compressed_matrix_t *output)
 {
     int ret = 0;
-    tsk_tree_position_t tp;
+    tsk_tree_position_t *tp = &self->tree_position;
     backward_transition_t transition;
     const double *restrict position = self->sites_position;
     const int direction = mode == MODE_BACKWARD ? TSK_DIR_REVERSE : TSK_DIR_FORWARD;
@@ -2736,7 +2757,9 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
     bool valid, new_tree;
     int handled;
 
-    tsk_tree_position_init(&tp, self->tree_sequence, 0);
+    if (mode != MODE_VITERBI) {
+        self->topology_valid = false;
+    }
     self->mode = mode;
     self->stats_num_sites = 0;
     self->stats_total_values = 0;
@@ -2768,7 +2791,7 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
     tsls_hmm_next_stamp(self);
     /* The forward algorithm starts from the uniform distribution over the
      * nodes and the backward from 1. */
-    ret = tsls_hmm_init_sweep(self, &tp, position[first_site],
+    ret = tsls_hmm_init_sweep(self, tp, position[first_site],
         mode == MODE_FORWARD ? 1.0 / tsls_hmm_get_n(self)
                              : (mode == MODE_VITERBI ? 0.0 : 1.0));
     if (ret != 0) {
@@ -2784,13 +2807,13 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
     new_tree = true;
 
     for (site = first_site; start <= site && site < end; site += direction) {
-        while (!(
-            tp.interval.left <= position[site] && position[site] < tp.interval.right)) {
-            valid = direction > 0 ? tsk_tree_position_next(&tp)
-                                  : tsk_tree_position_prev(&tp);
+        while (!(tp->interval.left <= position[site]
+                 && position[site] < tp->interval.right)) {
+            valid = direction > 0 ? tsk_tree_position_next(tp)
+                                  : tsk_tree_position_prev(tp);
             assert(valid);
             (void) valid;
-            tsls_hmm_update_tree(self, &tp);
+            tsls_hmm_update_tree(self, tp);
             new_tree = true;
         }
         if (mode == MODE_VITERBI && site == end - 1 && self->final_state != NULL_NODE
@@ -2808,7 +2831,7 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
                  * over the sites. */
                 self->tree_end_site = site + 1;
                 while (self->tree_end_site < end
-                       && position[self->tree_end_site] < tp.interval.right) {
+                       && position[self->tree_end_site] < tp->interval.right) {
                     self->tree_end_site++;
                 }
                 if (self->tree_end_site - site >= self->index_min_sites) {
@@ -2859,7 +2882,9 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
         self->stats_total_updated += self->site_num_updated;
     }
 out:
-    tsk_tree_position_free(&tp);
+    if (ret != 0) {
+        self->topology_valid = false;
+    }
     return ret;
 }
 
@@ -2904,26 +2929,19 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     double *restrict path_right, tsk_id_t *restrict path_parent)
 {
     int ret = 0;
-    tsk_tree_position_t tp;
+    tsk_tree_position_t *tp = &self->tree_position;
     tsk_id_t site, j, u, max_likelihood_node;
-    double x;
     bool valid, recombine;
     tsls_node_t *restrict tree = self->tree;
     const tsls_likelihood_t *restrict L = self->likelihood;
     const traceback_delta_t *delta;
     const double *restrict sites_position = self->sites_position;
-    /* Every root of the traceback tree has the virtual root as its parent,
-     * whose allelic state is the site's ancestral state, so the walk to find
-     * a node's allele doesn't need to check for the root. */
-    const tsk_id_t virtual_root = (tsk_id_t) self->num_nodes;
     const tsls_edge_t *restrict in;
     const tsls_edge_t *restrict out;
     const double start_pos = start == 0 ? 0 : sites_position[start];
     const double end_pos = end == (tsk_id_t) self->num_sites ? self->sequence_length
                                                              : sites_position[end];
     size_t path_length = 0;
-
-    tsk_tree_position_init(&tp, self->tree_sequence, 0);
 
     /* Prepare for the traceback and get the memory ready for recording
      * the output edges. */
@@ -2940,47 +2958,34 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     assert(max_likelihood_node != NULL_NODE);
     path_parent[path_length] = max_likelihood_node;
 
-    /* Build the tree at the last site, and then go through the trees in
-     * reverse, running the traceback at each site. */
-    for (u = 0; u < virtual_root; u++) {
-        tree[u].parent = virtual_root;
-        tree[u].allelic_state = TSK_NULL;
+    /* The forward pass already left the cursor at the final site's tree. */
+    for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
         tree[u].traceback_flag = L[u].value >= 0 ? 1 : -1;
     }
-    tree[virtual_root].parent = NULL_NODE;
-    x = sites_position[end - 1];
-    ret = seek_tree_position(&tp, x);
-    if (ret != 0) {
-        goto out;
-    }
-    in = tsls_index_get_edges(self->index, tp.in.order);
-    for (j = tp.in.start; j != tp.in.stop; j += tp.direction) {
-        if (seek_edge_covers(&tp, &in[j], x)) {
-            tree[in[j].child].parent = in[j].parent;
-        }
-    }
     for (site = end - 1; site >= start; site--) {
-        while (sites_position[site] < tp.interval.left) {
-            valid = tsk_tree_position_prev(&tp);
+        while (sites_position[site] < tp->interval.left) {
+            valid = tsk_tree_position_prev(tp);
             assert(valid);
             (void) valid;
-            out = tsls_index_get_edges(self->index, tp.out.order);
-            in = tsls_index_get_edges(self->index, tp.in.order);
-            for (j = tp.out.start; j != tp.out.stop; j--) {
-                tree[out[j].child].parent = virtual_root;
+            out = tsls_index_get_edges(self->index, tp->out.order);
+            in = tsls_index_get_edges(self->index, tp->in.order);
+            for (j = tp->out.start; j != tp->out.stop; j--) {
+                tsls_hmm_remove_edge(
+                    self, out[j].parent, out[j].child, false, NULL, NULL);
             }
-            for (j = tp.in.start; j != tp.in.stop; j--) {
-                tree[in[j].child].parent = in[j].parent;
+            for (j = tp->in.start; j != tp->in.stop; j--) {
+                tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false);
             }
         }
-        tree[virtual_root].allelic_state = self->index->ancestral_state[site];
         tsls_hmm_set_allelic_state(self, site);
         u = path_parent[path_length];
         while (tree[u].allelic_state == TSK_NULL) {
             u = tree[u].parent;
         }
-        match[site] = tree[u].allelic_state;
-        tsls_hmm_clear_allelic_state(self, site);
+        match[site] = tree[u].allelic_state == ROOT_ALLELE
+                          ? self->index->ancestral_state[site]
+                          : tree[u].allelic_state;
+        tsls_hmm_unset_allelic_state(self, site);
 
         /* Traverse up the tree from the current node. The first node in the
          * list after this site that we meet tells us whether we need to
@@ -2988,7 +2993,7 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
         u = path_parent[path_length];
         while (tree[u].traceback_flag != 1) {
             u = tree[u].parent;
-            assert(u != virtual_root);
+            assert(u != NULL_NODE);
         }
         delta = &self->traceback[site];
         tsls_hmm_undo_traceback_entries(
@@ -3019,7 +3024,7 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     if (self->flags & TSLS_EXTENDED_CHECKS) {
         /* Undoing every site leaves the state before the first: only the
          * roots of the first tree listed, at cost 0 */
-        for (u = 0; u < virtual_root; u++) {
+        for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
             assert(tree[u].traceback_flag == -1
                    || (L[u].site == start - 1
                        && (L[u].value == 0
@@ -3031,7 +3036,9 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     path_length++;
     *path_length_out = path_length;
 out:
-    tsk_tree_position_free(&tp);
+    if (ret != 0) {
+        self->topology_valid = false;
+    }
     return ret;
 }
 
@@ -3103,6 +3110,9 @@ tsls_hmm_find_path_matrix(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     ret = tsls_hmm_run_traceback(self, start, end, matched_haplotype, path_length,
         path_left, path_right, path_parent);
 out:
+    if (ret != 0) {
+        self->topology_valid = false;
+    }
     /* Reset the per-site state for the next call. Only the sites in the
      * window can have been set, and resetting just these matters for short
      * windows (tsinfer's early ancestors) on long sequences. */
@@ -3132,6 +3142,8 @@ tsls_hmm_forward(
 {
     int ret = 0;
 
+    self->topology_valid = false;
+
     if (output->num_sites != self->num_sites) {
         ret = TSLS_ERR_BAD_SITE_RANGE;
         goto out;
@@ -3150,6 +3162,8 @@ tsls_hmm_backward(tsls_hmm_t *self, const allele_t *haplotype,
 {
     int ret = 0;
     size_t j;
+
+    self->topology_valid = false;
 
     if (output->num_sites != self->num_sites) {
         ret = TSLS_ERR_BAD_SITE_RANGE;
