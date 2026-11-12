@@ -2614,6 +2614,13 @@ tsls_hmm_process_site_indexed(
         || self->match_cost[site] != 0) {
         goto out;
     }
+    /* A previous best node can leave and re-enter between observations.
+     * Its ID is present again, but its old likelihood has been lost. Sparse
+     * processing requires an actual prefix maximum after the edge changes. */
+    a = tsls_hmm_find_listed(self, best_node);
+    if (tsls_hmm_deferred_cost(self, L[a].value, L[a].site) != best) {
+        goto out;
+    }
     if (state != TSLS_MISSING_DATA) {
         num_segments = tsls_hmm_site_segments(self, site);
         if (tsls_hmm_segment_allele(self, num_segments, preorder[best_node]) != state) {

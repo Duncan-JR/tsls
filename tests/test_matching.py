@@ -1905,6 +1905,32 @@ class TestRegionalReuse:
     def panel(self):
         return gap_ts()
 
+    def test_sparse_prefix_maximum_after_reentry(self, panel):
+        A, present, continuous = dense.node_states(panel, ALLELES)
+        h = np.array([1, 2, 2, 0], dtype=np.int8)
+        rho = np.full(4, 0.1)
+        mu = np.full(4, 0.02)
+        hmm = tsls.Hmm(
+            panel,
+            rho,
+            mu,
+            alleles=ALLELES,
+            likelihood_threshold=0,
+            index_min_sites=1,
+            extended_checks=True,
+        )
+        out = np.empty(4, dtype=np.int8)
+        path = hmm.find_path(h, 0, 4, out)
+        donors = path_by_site(panel, *path)
+        expected = dense.viterbi_log_likelihood(
+            A, present, continuous, h, rho, mu, len(ALLELES), panel.num_nodes
+        )
+        observed = dense.path_log_likelihood(
+            A, present, continuous, h, rho, mu, len(ALLELES), panel.num_nodes, donors
+        )
+        assert observed == pytest.approx(expected)
+        assert hmm.num_sparse_sites > 0
+
     def test_independent_ordered_windows(self, panel):
         A, _, _ = dense.node_states(panel, ALLELES)
         rho = np.full(4, 0.1)
