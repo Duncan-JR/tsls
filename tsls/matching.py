@@ -137,7 +137,8 @@ class CompressedMatrix:
     @property
     def log_likelihood(self):
         """
-        The log likelihood of the haplotype (for the forward matrix).
+        The log total path weight of the haplotype (for the forward matrix).
+        With sample-scaled transitions this need not be a log probability.
         """
         return float(np.sum(np.log(self.normalisation_factor)))
 
@@ -212,8 +213,14 @@ class Hmm(_tsls.Hmm):
     and mismatch probabilities. ``alleles`` is passed to tsls.TreeSequence,
     and can only be given with a tskit.TreeSequence.
 
-    At each site we recombine with the recombination probability r, and then
-    copy a node chosen uniformly from all the nodes of the tree sequence.
+    At each site a switch to a particular node has weight r / n and staying
+    on a continuously available node has weight 1 - r + r / n. Here n is
+    ``sample_size``, the fixed number of haploid chromosomes in the cohort,
+    used for all matching, including ancestors. If omitted, it defaults to
+    the reference tree sequence's number of samples. Supply it explicitly
+    for ancestral panels or subsets that do not retain the cohort samples.
+    It must be a positive integer; it is not the number of copying states
+    or the number of queries in a matching batch.
     See docs/likelihood_model.md, and tsls.switch_odds, mismatch_odds and
     their inverses for the conversions between probabilities and the odds
     that Viterbi depends on. To specify
@@ -267,6 +274,7 @@ class Hmm(_tsls.Hmm):
         mismatch,
         *,
         alleles=None,
+        sample_size=None,
         likelihood_threshold=None,
         prune_threshold=None,
         weight_by_n=None,
@@ -279,9 +287,9 @@ class Hmm(_tsls.Hmm):
         if weight_by_n is not None:
             raise ValueError(
                 "weight_by_n has been removed: recombination is always divided "
-                "by the number of nodes. For the weight_by_n=False model with "
+                "by the haploid sample size. For the weight_by_n=False model with "
                 "recombination rho, use tsls.recombination_probability"
-                "(rho, ts.num_nodes)"
+                "(rho, sample_size)"
             )
         if not isinstance(ts, TreeSequence):
             ts = TreeSequence(ts, alleles=alleles)
@@ -302,7 +310,16 @@ class Hmm(_tsls.Hmm):
             kwargs["index_min_sites"] = index_min_sites
         self.tree_sequence = ts
         self.ts = ts.ts
-        super().__init__(ts, recombination=recombination, mismatch=mismatch, **kwargs)
+        if sample_size is None:
+            sample_size = self.ts.num_samples
+        self.sample_size = sample_size
+        super().__init__(
+            ts,
+            recombination=recombination,
+            mismatch=mismatch,
+            sample_size=sample_size,
+            **kwargs,
+        )
 
     def find_path(
         self,

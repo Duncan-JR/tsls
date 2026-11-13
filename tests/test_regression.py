@@ -1,18 +1,9 @@
 """
-Regression tests on cases captured from the benchmark workloads when the
-tsinfer-hmm engine was still in this repository (the capture script,
-benchmarking/capture_regression.py, and the benchmarks are in the git
-history).
+Exercise sample-scaled matching on captured tsinfer and sc2ts workloads.
 
-Each case in data/regression has a gzipped reference tree sequence, query
-haplotypes with their windows, the per-site recombination and mismatch
-probabilities, and the outputs of tsls: the Viterbi path, the sites where
-it mismatches, its log likelihood, and for some cases the forward log
-likelihood and posteriors. When the cases were captured, tsinfer-hmm found
-paths with the same likelihood for every query, and the same path except
-where same_as_tsinfer is False (ties between equally likely paths). We
-require the likelihood and number of mismatches to be the same, and the
-path to be the same wherever the engines agreed.
+The stored outputs used node-scaled transitions and are not expectations
+for this model. Compare sparse and full execution under the same fixed
+haploid sample size; small-panel tests check the model against dense maths.
 """
 
 import gzip
@@ -38,6 +29,8 @@ class Case:
         with gzip.open(gz_path, "rb") as f_in, open(trees_path, "wb") as f_out:
             shutil.copyfileobj(f_in, f_out)
         self.ts = tskit.load(trees_path)
+        # A fixed test cohort size, including for ancestor-only references.
+        self.sample_size = 100
         with open(case_dir / "case.json") as f:
             self.alleles = json.load(f)["alleles"]
         with np.load(case_dir / "case.npz") as data:
@@ -52,19 +45,13 @@ class Case:
         d = self.data
         return d["haplotypes"][j], int(d["start"][j]), int(d["end"][j])
 
-    def path(self, j):
-        d = self.data
-        a, b = d["path_offset"][j], d["path_offset"][j + 1]
-        return d["path_left"][a:b], d["path_right"][a:b], d["path_parent"][a:b]
-
-    def mismatch_sites(self, j):
-        d = self.data
-        a, b = d["mismatch_offset"][j], d["mismatch_offset"][j + 1]
-        return d["mismatch_site"][a:b]
-
-    def hmm(self):
+    def hmm(self, *, sparse=True):
         return tsls.Hmm(
-            self.reference, self.data["recombination"], self.data["mismatch"]
+            self.reference,
+            self.data["recombination"],
+            self.data["mismatch"],
+            sparse=sparse,
+            sample_size=self.sample_size,
         )
 
     def num_alleles(self):
@@ -96,7 +83,7 @@ def path_log_likelihood(case, h, start, end, path, matched):
     left = path[0]
     rho = case.data["recombination"]
     mu = case.data["mismatch"]
-    n = case.ts.num_nodes
+    n = case.sample_size
     num_alleles = case.num_alleles()
     sites = np.arange(start, end)
     switch = np.isin(case.ts.sites_position[sites], left[1:])
@@ -130,10 +117,10 @@ def path_haplotypes(case, paths):
     return H
 
 
-def find_path(case, j):
+def find_path(case, j, *, sparse=True):
     h, start, end = case.query(j)
     matched = np.zeros(case.ts.num_sites, dtype=np.int8)
-    left, right, parent = case.hmm().find_path(h, start, end, matched)
+    left, right, parent = case.hmm(sparse=sparse).find_path(h, start, end, matched)
     path = left[::-1], right[::-1], parent[::-1]
     return path, matched
 
@@ -142,36 +129,11 @@ class TestViterbi:
     def test_log_likelihood(self, case):
         for j in range(case.num_queries):
             h, start, end = case.query(j)
-            path, matched = find_path(case, j)
-            ll = path_log_likelihood(case, h, start, end, path, matched)
-            expected = case.data["log_likelihood"][j]
-            assert ll == pytest.approx(expected, rel=1e-9)
-
-    def test_num_mismatches(self, case):
-        for j in range(case.num_queries):
-            h, start, end = case.query(j)
-            _, matched = find_path(case, j)
-            sites = np.arange(start, end)
-            observed = sites[h[sites] != -1]
-            num_mismatches = np.sum(h[observed] != matched[observed])
-            assert num_mismatches == case.data["num_mismatches"][j]
-
-    def test_paths(self, case):
-        num_compared = 0
-        for j in range(case.num_queries):
-            if not case.data["same_as_tsinfer"][j]:
-                continue
-            h, start, end = case.query(j)
-            path, matched = find_path(case, j)
-            expected = case.path(j)
-            for a, b in zip(path, expected):
-                np.testing.assert_array_equal(a, b)
-            sites = np.arange(start, end)
-            observed = sites[h[sites] != -1]
-            mismatches = observed[h[observed] != matched[observed]]
-            np.testing.assert_array_equal(mismatches, case.mismatch_sites(j))
-            num_compared += 1
-        assert num_compared > 0
+            scores = []
+            for sparse in [True, False]:
+                path, matched = find_path(case, j, sparse=sparse)
+                scores.append(path_log_likelihood(case, h, start, end, path, matched))
+            assert scores[0] == pytest.approx(scores[1], rel=1e-9)
 
     def test_matched_haplotype_is_path_haplotype(self, case):
         results = [find_path(case, j) for j in range(case.num_queries)]
@@ -191,34 +153,18 @@ class TestViterbi:
 
 
 class TestForwardBackward:
-    def test_forward_log_likelihood(self, case):
-        expected = case.data["forward_log_likelihood"]
-        if np.all(np.isnan(expected)):
-            pytest.skip("No forward likelihoods for this case")
-        # The sc2ts queries are long, so check a few of them.
-        for j in range(0, case.num_queries, 4 if case.ts.num_sites > 10000 else 1):
-            h, _, _ = case.query(j)
-            F = case.hmm().forward_matrix(h)
-            assert F.log_likelihood == pytest.approx(expected[j], rel=1e-10)
-
     def test_posteriors(self, case):
-        if "posterior" not in case.data:
-            pytest.skip("No posteriors for this case")
-        for j in range(case.num_queries):
+        # Check a few queries from long captured workloads.
+        step = 4 if case.ts.num_sites > 10000 else 1
+        for j in range(0, case.num_queries, step):
             h, _, _ = case.query(j)
-            hmm = case.hmm()
-            F = hmm.forward_matrix(h)
-            B = hmm.backward_matrix(h, F.normalisation_factor)
-            P = F.decode() * B.decode()
-            P /= np.sum(P, axis=1)[:, np.newaxis]
-            if j == 0:
-                np.testing.assert_allclose(P, case.data["posterior"], atol=1e-10)
-            np.testing.assert_allclose(
-                np.max(P, axis=1), case.data["posterior_max"][j], atol=1e-10
-            )
-            # The most likely node is only compared where it's clear.
-            top2 = np.sort(P, axis=1)[:, -2:]
-            clear = top2[:, 1] - top2[:, 0] > 1e-6
-            np.testing.assert_array_equal(
-                np.argmax(P, axis=1)[clear], case.data["posterior_max_node"][j][clear]
-            )
+            posteriors = []
+            scores = []
+            for sparse in [True, False]:
+                hmm = case.hmm(sparse=sparse)
+                forward = hmm.forward_matrix(h)
+                backward = hmm.backward_matrix(h, forward.normalisation_factor)
+                posteriors.append(forward.decode() * backward.decode())
+                scores.append(forward.log_likelihood)
+            assert scores[0] == pytest.approx(scores[1], rel=1e-10)
+            np.testing.assert_allclose(posteriors[0], posteriors[1], atol=1e-10)

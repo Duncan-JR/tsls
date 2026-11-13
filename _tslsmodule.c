@@ -299,10 +299,11 @@ Hmm_init(Hmm *self, PyObject *args, PyObject *kwds)
     int count_distinct = 0;
     int sparse = 1;
     int index_min_sites = 16;
-    static char *kwlist[]
-        = { "tree_sequence", "recombination", "mismatch", "extended_checks",
-              "likelihood_threshold", "prune_threshold", "relative_prune_threshold",
-              "count_distinct", "sparse", "index_min_sites", NULL };
+    Py_ssize_t sample_size;
+    static char *kwlist[] = { "tree_sequence", "recombination", "mismatch",
+        "sample_size", "extended_checks", "likelihood_threshold", "prune_threshold",
+        "relative_prune_threshold", "count_distinct", "sparse", "index_min_sites",
+        NULL };
     TreeSequence *tree_sequence = NULL;
     PyObject *recombination = NULL;
     PyObject *mismatch = NULL;
@@ -316,10 +317,14 @@ Hmm_init(Hmm *self, PyObject *args, PyObject *kwds)
 
     self->hmm = NULL;
     self->tree_sequence = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OO|idddiii", kwlist,
-            &TreeSequenceType, &tree_sequence, &recombination, &mismatch,
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OOn|idddiii", kwlist,
+            &TreeSequenceType, &tree_sequence, &recombination, &mismatch, &sample_size,
             &extended_checks, &likelihood_threshold, &prune_threshold,
             &relative_prune_threshold, &count_distinct, &sparse, &index_min_sites)) {
+        goto out;
+    }
+    if (sample_size <= 0) {
+        PyErr_SetString(PyExc_ValueError, "sample_size must be positive");
         goto out;
     }
     self->tree_sequence = tree_sequence;
@@ -367,7 +372,7 @@ Hmm_init(Hmm *self, PyObject *args, PyObject *kwds)
     }
     err = tsls_hmm_alloc(self->hmm, self->tree_sequence->index,
         PyArray_DATA(recombination_array), PyArray_DATA(mismatch_array),
-        likelihood_threshold, flags);
+        (size_t) sample_size, likelihood_threshold, flags);
     if (err != 0) {
         handle_library_error(err);
         goto out;

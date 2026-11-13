@@ -216,8 +216,9 @@ test_forest_matching(void)
     build_forest_ts(&ts, false);
     ret = index_init_acgt(&index, &ts);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
-    ret = tsls_hmm_alloc(&hmm, &index, rho, mu, DBL_MIN, TSLS_EXTENDED_CHECKS);
+    ret = tsls_hmm_alloc(&hmm, &index, rho, mu, 3, DBL_MIN, TSLS_EXTENDED_CHECKS);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
+    CU_ASSERT_EQUAL(hmm.sample_size, 3);
 
     ret = tsls_hmm_find_path(
         &hmm, 0, 4, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
@@ -229,6 +230,9 @@ test_forest_matching(void)
     for (j = 0; j < 4; j++) {
         CU_ASSERT_EQUAL(match[j], h[j]);
     }
+    CU_ASSERT_DOUBLE_EQUAL(hmm.stay_cost[0], -log(1 - rho[0] + rho[0] / 3), 1e-12);
+    CU_ASSERT_DOUBLE_EQUAL(
+        hmm.switch_cost[0], -log(rho[0] / 3) - hmm.stay_cost[0], 1e-12);
     CU_ASSERT(tsls_hmm_get_mean_traceback_size(&hmm) > 0);
     CU_ASSERT(tsls_hmm_get_total_memory(&hmm) > 0);
     tsls_hmm_print_state(&hmm, _devnull);
@@ -323,8 +327,12 @@ test_bad_inputs(void)
     build_forest_ts(&ts, false);
     ret = index_init_acgt(&index, &ts);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
-    ret = tsls_hmm_alloc(&hmm, &index, rho, zero_mu, DBL_MIN, 0);
+    ret = tsls_hmm_alloc(&hmm, &index, rho, zero_mu, 0, DBL_MIN, 0);
+    CU_ASSERT_EQUAL(ret, TSLS_ERR_BAD_PARAM_VALUE);
+    tsls_hmm_free(&hmm);
+    ret = tsls_hmm_alloc(&hmm, &index, rho, zero_mu, 3, DBL_MIN, 0);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
+    CU_ASSERT_EQUAL(hmm.sample_size, 3);
 
     ret = tsls_hmm_find_path(
         &hmm, 0, 4, TSK_NULL, TSK_NULL, bad_h, match, &path_length, left, right, parent);

@@ -396,7 +396,7 @@ class TestHmmWithRecombinationRate:
 
     def find_path(self, recombination, mismatch):
         ts, _, _ = self.reference_ts()
-        hmm = tsls.Hmm(ts, recombination, np.full(3, mismatch))
+        hmm = tsls.Hmm(ts, recombination, np.full(3, mismatch), sample_size=100)
         matched = np.zeros(3, dtype=np.int8)
         h = np.array([1, 1, 1], dtype=np.int8)
         left, _, parent = hmm.find_path(h, 0, 3, matched)
@@ -430,7 +430,7 @@ class TestHmmWithRecombinationRate:
         tables = ts.dump_tables()
         tables.mutations.add_row(site=1, node=b, derived_state="T")
         tables.sort()
-        hmm = tsls.Hmm(tables.tree_sequence(), r, np.full(3, 1e-20))
+        hmm = tsls.Hmm(tables.tree_sequence(), r, np.full(3, 1e-20), sample_size=100)
         matched = np.zeros(3, dtype=np.int8)
         h = np.array([1, 1, 1], dtype=np.int8)
         left, _, parent = hmm.find_path(h, 0, 3, matched)

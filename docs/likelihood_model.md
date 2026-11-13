@@ -10,41 +10,47 @@ model, and derives exact Viterbi thresholds from it. The functions
 ## The model
 
 The states at site j are the nodes in the local tree T_j: the nodes with a
-parent or at least one child. Let n be the number of nodes in the tree
-sequence, r_j the recombination probability and mu_j the mismatch
-probability at site j, and A_j the number of alleles at the site. If the
-alleles are given (`tsls.TreeSequence(ts, alleles=...)`), A_j is the length
-of site j's list, whether or not the alleles are all in the tree sequence
-there. Otherwise A_j is the number of distinct states at the site in the
-tree sequence, and at least 2.
+parent or at least one child. Let n be the fixed number of haploid sampled
+chromosomes in the cohort, r_j the recombination input and mu_j the mismatch
+probability at site j, and A_j the number of alleles at the site. Pass
+`sample_size=n` to `tsls.Hmm`, including when matching ancestors. If omitted,
+it defaults to `ts.num_samples`; that default is appropriate only when the
+reference retains the cohort samples. The count must be positive and is
+independent of the number of nodes, local copying states or batch queries.
+If the alleles are given (`tsls.TreeSequence(ts, alleles=...)`), A_j is the
+length of site j's list, whether or not the alleles are all in the tree
+sequence there. Otherwise A_j is the number of distinct states at the site
+in the tree sequence, and at least 2.
 
-**Start.** The path starts at a node chosen uniformly from all n nodes. The
-transition below is applied at the first site too, so each node in T_0
-starts with probability `(1 - r_0 + r_0 P_0 / n) / n`, where P_0 is the
-number of nodes in T_0. This is the same for every node, so it doesn't
-affect Viterbi paths or posteriors, but it makes the likelihood depend on
-which end of the sequence the path starts from.
+**Start.** Each available node starts with weight 1/n in the forward
+algorithm. The transition below is applied at the first site too, so each
+node in T_0 starts with weight `(1 - r_0 + r_0 P_0 / n) / n`, where P_0 is
+the number of nodes in T_0. This is the same for every node, so it doesn't
+affect Viterbi paths or normalised posteriors, but it makes the forward
+score depend on which end of the sequence the path starts from.
 
-**Transition** into site j. With probability r_j the path recombines and
-copies a node chosen uniformly from all n nodes. Otherwise it stays on the
-same node. The path ends (it is *killed*) if the node it copies is not in
-T_j. A node that is not in the tree over the whole interval since the
-previous site counts as absent: it can't be stayed on, only reached by
-recombination.
+**Transition** into site j. A switch to a particular node has weight r_j/n,
+and continuing on a node has weight 1-r_j+r_j/n. A node that is not in the
+tree over the whole interval since the previous site can't be stayed on,
+only reached by recombination.
 
     T_j(u -> v) = (1 - r_j) [u = v, v continuous] + r_j / n,   v in T_j
+
+These are Option A's sample-scaled weights. For a continuing origin, the
+row sum is `1 - r_j + K_j r_j/n`, where K_j is the number of local copying
+states. It can exceed one when K_j > n, so this is a weighted path model,
+not necessarily a stochastic or killed Markov chain. No K_j factor is
+added to the path score. Adding reference nodes outside the matched region
+does not change the weights of existing paths when n is fixed.
 
 **Emission.** The node's allele is copied with probability
 `1 - (A_j - 1) mu_j`, and each other allele with probability mu_j. Missing
 data has probability 1.
 
-The rows of T_j sum to at most 1, so this is a sub-stochastic (killed)
-Markov chain. It is a proper probability model. The forward algorithm
-computes `P(h, path survives)`, and the posteriors are conditional on the
-path surviving. This is the model the engine has always used with
-`weight_by_n=True`. The only change is that the forward algorithm now starts
-from 1/n per node rather than 1, so the log likelihood is the probability
-above.
+Forward and backward use the same transition weights and compute
+normalised marginals over weighted paths. `CompressedMatrix.log_likelihood`
+is the log of the total forward weight; it need not be a log probability.
+Viterbi maximises path weight.
 
 ## Viterbi depends only on two odds
 
@@ -101,33 +107,15 @@ model with r (`TestModelEquivalence`) have:
 - the same normalised forward and backward values, and so the same
   posteriors;
 - normalisation factors that differ by `(1 - rho) / (1 - r)` at each site
-  (and n at the first site). So only the old *log likelihood* was wrong: it
-  was not the probability of anything.
+  (and n at the first site). These are weighted path scores; neither
+  parameterisation guarantees a probability model when the state count
+  differs from the haploid sample size.
 
-So nothing about the sc2ts model needs a separate code path. Pass
-`r = recombination_probability(rho, n)`. What the model makes explicit is what
-the sc2ts setting means as a probability model. Fixing the cost of switching
-to *each* of n nodes means the total recombination probability grows with
-n. With sc2ts's parameters (k = 3, mu = 0.0125, 5 alleles, rho = 2.51e-6):
-
-| n | r per site | (1 - rho) / (1 - r) |
-|---|---|---|
-| 20,000 | 0.048 | 1.05 |
-| 100,000 | 0.20 | 1.25 |
-| 3,400,000 | 0.89 | 9.5 |
-
-That is why forward-backward with sc2ts parameters gives diffuse posteriors.
-They are the correct posteriors of a model in which recombination is
-frequent. No model in this family has both the sc2ts switch cost and a
-small r: in any of them `r / n ≈ q (1 - r)`. For posteriors with a
-plausible recombination probability, run forward-backward with that r. In
-Viterbi, this charges a switch about `log(n / r)` in log odds, which is more
-than k mismatches.
-
-Since r depends on n, the r for an sc2ts-style model must be computed from
-the tree sequence that is being matched against. As r approaches 1 (q n much
-larger than 1), the engine computes `1 - r` with relative error about
-`1e-16 / (1 - r)`. This is about 1e-15 at n = 3.4M.
+Pass `r = recombination_probability(rho, n)` with the same fixed haploid
+cohort size n supplied to `Hmm(sample_size=n)`. It does not need to be
+recomputed when ancestral groups add reference nodes. As r approaches 1
+(q n much larger than 1), the engine computes `1 - r` with relative error
+about `1e-16 / (1 - r)`.
 
 ## Exact Viterbi thresholds
 

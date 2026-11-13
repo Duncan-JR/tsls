@@ -135,7 +135,7 @@ class TestConversions:
             e**3 * (1 - tol), rel=1e-14
         )
         t = tsls.path_threshold(
-            2, 0.01, 5, num_switches=1, recombination=0.02, num_nodes=100
+            2, 0.01, 5, num_switches=1, recombination=0.02, sample_size=100
         )
         assert t == pytest.approx(e**2 * q * (1 - tol), rel=1e-14)
 
@@ -169,7 +169,7 @@ class TestModelEquivalence:
         ts = EXAMPLES[name]()
         A, present, continuous = dense.node_states(ts, ALLELES)
         m = ts.num_sites
-        n = ts.num_nodes
+        n = ts.num_samples
         q_a = np.full(m, q)
         r_a = tsls.recombination_probability(q_a, n)
         mu = np.full(m, 0.02)
@@ -197,7 +197,7 @@ class TestModelEquivalence:
         m = ts.num_sites
         q_a = np.full(m, q)
         mu = np.full(m, 0.02)
-        r = tsls.recombination_probability(q_a, ts.num_nodes)
+        r = tsls.recombination_probability(q_a, ts.num_samples)
         am = tsls.Hmm(ts, r, mu, alleles=ALLELES, extended_checks=True)
         for h in queries(ts, A, present):
             match = np.zeros(m, dtype=np.int8)
@@ -215,7 +215,7 @@ def test_viterbi_values_are_odds(name, rho, mu):
     ts = EXAMPLES[name]()
     A, present, continuous = dense.node_states(ts, ALLELES)
     m = ts.num_sites
-    n = ts.num_nodes
+    n = ts.num_samples
     rho_a = np.full(m, rho)
     mu_a = np.full(m, mu)
     for h in queries(ts, A, present):
@@ -251,7 +251,7 @@ class TestPruneThreshold:
         ts = wright_fisher_ts(seed, num_trees_hint=num_trees_hint)
         A, present, continuous = dense.node_states(ts, ALLELES)
         m = ts.num_sites
-        n = ts.num_nodes
+        n = ts.num_samples
         rho = tsls.recombination_probability(np.full(m, 1e-5), n)
         mu = np.full(m, 0.01)
         num_sparse_sites = 0
@@ -261,7 +261,7 @@ class TestPruneThreshold:
             path, match, _ = self.run(ts, h, rho, mu, 0, sparse)
             _, k, s = path_log_odds(continuous, h, match, path, rho, mu, A_NUM, n)
             t = tsls.path_threshold(
-                k, mu, A_NUM, num_switches=s, recombination=rho, num_nodes=n
+                k, mu, A_NUM, num_switches=s, recombination=rho, sample_size=n
             )
             path, match, am = self.run(ts, h, rho, mu, t, sparse)
             num_sparse_sites += am.num_sparse_sites
@@ -279,7 +279,7 @@ class TestPruneThreshold:
         ts = wright_fisher_ts(seed, num_trees_hint=2)
         A, present, continuous = dense.node_states(ts, ALLELES)
         m = ts.num_sites
-        n = ts.num_nodes
+        n = ts.num_samples
         rho = tsls.recombination_probability(np.full(m, 1e-4), n)
         mu = np.full(m, 0.01)
         num_certified = 0
@@ -318,7 +318,7 @@ class TestPruneThreshold:
             tables.mutations.add_row(site=j, node=1 if j < k else 0, derived_state="C")
         ts = finalise(tables)
         h = np.full(m, ALLELES.index("C"), dtype=np.int8)
-        n = ts.num_nodes
+        n = ts.num_samples
         mu = np.full(m, 0.01)
         e = tsls.mismatch_odds(0.01, A_NUM)
         # A switch costs one more mismatch than k
@@ -363,3 +363,119 @@ def test_weight_by_n_removed():
     m = ts.num_sites
     with pytest.raises(ValueError, match="recombination_probability"):
         tsls.Hmm(ts, np.full(m, 0.01), np.full(m, 0.01), weight_by_n=False)
+
+
+class TestSampleSize:
+    @pytest.mark.parametrize("sample_size", [1, 4, 100])
+    @pytest.mark.parametrize("sparse", [False, True])
+    def test_matching_against_dense(self, sample_size, sparse):
+        ts = EXAMPLES["two_trees"]()
+        A, present, continuous = dense.node_states(ts, ALLELES)
+        m = ts.num_sites
+        rho = np.linspace(0.01, 0.2, m)
+        mu = np.full(m, 0.02)
+        hmm = tsls.Hmm(
+            ts,
+            rho,
+            mu,
+            alleles=ALLELES,
+            sample_size=sample_size,
+            sparse=sparse,
+            index_min_sites=1,
+            extended_checks=True,
+        )
+        for h in queries(ts, A, present):
+            args = (A, present, continuous, h, rho, mu, A_NUM, sample_size)
+            matched = np.zeros(m, dtype=np.int8)
+            path = path_by_site(ts, *hmm.find_path(h, 0, m, matched))
+            np.testing.assert_array_equal(matched, A[np.arange(m), path])
+            score = dense.path_log_likelihood(*args, path)
+            assert score == pytest.approx(dense.viterbi_log_likelihood(*args))
+            _, _, matrix = hmm.viterbi_matrix(h)
+            expected, factors = dense.viterbi_matrix(*args)
+            np.testing.assert_allclose(matrix.decode(), expected, atol=1e-15)
+            np.testing.assert_allclose(matrix.normalisation_factor, factors)
+            forward = hmm.forward_matrix(h)
+            expected, factors = dense.forward(*args)
+            np.testing.assert_allclose(forward.decode(), expected, atol=1e-15)
+            np.testing.assert_allclose(forward.normalisation_factor, factors)
+            backward = hmm.backward_matrix(h, factors)
+            np.testing.assert_allclose(
+                backward.decode(),
+                dense.backward(*args, factors),
+                atol=1e-15,
+            )
+
+    def test_default_is_reference_sample_count(self):
+        ts = EXAMPLES["two_trees"]()
+        rho = np.full(ts.num_sites, 0.05)
+        mu = np.full(ts.num_sites, 0.02)
+        default = tsls.Hmm(ts, rho, mu, alleles=ALLELES)
+        explicit = tsls.Hmm(ts, rho, mu, alleles=ALLELES, sample_size=ts.num_samples)
+        assert default.sample_size == ts.num_samples
+        A, present, _ = dense.node_states(ts, ALLELES)
+        for h in queries(ts, A, present):
+            np.testing.assert_array_equal(
+                default.viterbi_matrix(h)[2].decode(),
+                explicit.viterbi_matrix(h)[2].decode(),
+            )
+
+    def test_ancestor_panel_without_sample_flags(self):
+        ts = EXAMPLES["two_trees"]()
+        tables = ts.dump_tables()
+        tables.nodes.flags = np.zeros(ts.num_nodes, dtype=np.uint32)
+        reference = tables.tree_sequence()
+        rho = np.full(ts.num_sites, 0.05)
+        mu = np.full(ts.num_sites, 0.02)
+        with pytest.raises(ValueError, match="sample_size must be positive"):
+            tsls.Hmm(reference, rho, mu)
+        hmm = tsls.Hmm(reference, rho, mu, sample_size=100)
+        assert hmm.sample_size == 100
+        h = np.zeros(ts.num_sites, dtype=np.int8)
+        match = np.zeros_like(h)
+        left, right, parent = hmm.find_path(h, 0, ts.num_sites, match)
+        assert len(parent) > 0
+        assert left[-1] == 0
+        assert right[0] == ts.sequence_length
+
+    @pytest.mark.parametrize("sample_size", [0, -1])
+    def test_nonpositive_sample_size(self, sample_size):
+        ts = EXAMPLES["single_tree"]()
+        rates = np.full(ts.num_sites, 0.01)
+        with pytest.raises(ValueError, match="sample_size must be positive"):
+            tsls.Hmm(ts, rates, rates, sample_size=sample_size)
+
+    @pytest.mark.parametrize("sample_size", [1.5, "100"])
+    def test_noninteger_sample_size(self, sample_size):
+        ts = EXAMPLES["single_tree"]()
+        rates = np.full(ts.num_sites, 0.01)
+        with pytest.raises(TypeError):
+            tsls.Hmm(ts, rates, rates, sample_size=sample_size)
+
+    def test_nodes_outside_region_do_not_change_matching(self):
+        ts = EXAMPLES["single_tree"]()
+        tables = ts.dump_tables()
+        end = ts.sequence_length
+        tables.sequence_length = end + 10
+        for _ in range(20):
+            child = tables.nodes.add_row(time=0)
+            parent = tables.nodes.add_row(time=1)
+            tables.edges.add_row(end, end + 10, parent, child)
+        tables.sort()
+        expanded = tables.tree_sequence()
+        rho = np.full(ts.num_sites, 0.05)
+        mu = np.full(ts.num_sites, 0.02)
+        A, present, _ = dense.node_states(ts, ALLELES)
+        for h in queries(ts, A, present):
+            results = []
+            for reference in [ts, expanded]:
+                hmm = tsls.Hmm(reference, rho, mu, alleles=ALLELES, sample_size=100)
+                matched = np.zeros(ts.num_sites, dtype=np.int8)
+                left, _, parent = hmm.find_path(h, 0, ts.num_sites, matched)
+                results.append((left, parent, matched, hmm.viterbi_matrix(h)[2]))
+            for original, extra in zip(results[0][:3], results[1][:3]):
+                np.testing.assert_array_equal(original, extra)
+            np.testing.assert_array_equal(
+                results[0][3].decode(),
+                results[1][3].decode()[:, : ts.num_nodes],
+            )

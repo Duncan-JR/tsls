@@ -16,12 +16,12 @@ implementations that were in tsinfer and [tskit](https://github.com/tskit-dev/ts
   multiple mutations per site, any number of alleles and any (including
   non-integer) coordinates.
 - There is one likelihood model, with recombination always divided by the
-  number of nodes, and exact Viterbi prune thresholds derived from it
+  fixed haploid sample size, and exact Viterbi prune thresholds derived from it
   ([docs/likelihood_model.md](docs/likelihood_model.md); `tsls.switch_odds`,
   `tsls.path_threshold` etc.).
   sc2ts's model, which specifies a recombination by its cost in
   mismatches, is the same model with
-  `r = tsls.recombination_probability(rho, num_nodes)`.
+  `r = tsls.recombination_probability(rho, sample_size)`.
 
 ## Usage
 
@@ -29,7 +29,10 @@ implementations that were in tsinfer and [tskit](https://github.com/tskit-dev/ts
 and can be shared between HMMs, including in different threads.
 `tsls.Hmm` runs the Viterbi algorithm (`find_path`, `viterbi_matrix`) and
 the forward and backward algorithms (`forward_matrix`, `backward_matrix`),
-which return compressed matrices. See the docstrings for details.
+which return compressed matrices. Pass ``sample_size=n`` to keep the
+haploid cohort size fixed when matching ancestors or using a subset of the
+reference panel. By default it is the reference tree sequence's sample count.
+See the docstrings for details.
 
 tsinfer and sc2ts trees have a vestigial root, node 0, whose only child is
 node 1. tsls can copy node 0 wherever node 1 can be copied, with the same

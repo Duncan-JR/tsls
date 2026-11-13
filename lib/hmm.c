@@ -807,7 +807,7 @@ neg_log1p(double x)
 static void
 tsls_hmm_compute_costs(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end)
 {
-    const double n = (double) self->num_nodes;
+    const double n = (double) self->sample_size;
     double r, mu, num_alleles, stay, match, mismatch, base;
     tsk_id_t j;
 
@@ -815,7 +815,7 @@ tsls_hmm_compute_costs(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end)
         r = self->recombination_rate[j];
         mu = self->mismatch_rate[j];
         num_alleles = (double) self->index->num_alleles[j];
-        /* Staying has probability 1 - r + r / n, switching r / n */
+        /* Staying has weight 1 - r + r / n, switching r / n. */
         stay = neg_log1p(r / n - r);
         self->stay_cost[j] = stay;
         self->switch_cost[j] = stay == INFINITY ? 0 : neg_log(r / n) - stay;
@@ -835,13 +835,17 @@ tsls_hmm_compute_costs(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end)
 
 int
 tsls_hmm_alloc(tsls_hmm_t *self, const tsls_index_t *index,
-    const double *recombination_rate, const double *mismatch_rate,
+    const double *recombination_rate, const double *mismatch_rate, size_t sample_size,
     double likelihood_threshold, int flags)
 {
     int ret = 0;
     const size_t N = index->num_nodes;
 
     memset(self, 0, sizeof(tsls_hmm_t));
+    if (sample_size == 0) {
+        return TSLS_ERR_BAD_PARAM_VALUE;
+    }
+    self->sample_size = sample_size;
     self->flags = flags;
     self->likelihood_threshold = likelihood_threshold;
     self->index_min_sites = 16;
@@ -1725,7 +1729,7 @@ check_haplotype_state(const tsls_hmm_t *self, tsk_id_t site, allele_t state)
 static inline double
 tsls_hmm_get_n(const tsls_hmm_t *self)
 {
-    return (double) self->num_nodes;
+    return (double) self->sample_size;
 }
 
 /* Compute the number of nodes in the tree that inherit the likelihood of
@@ -2793,8 +2797,8 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
     self->prune_cost = prune > 0 ? -log(prune) : INFINITY;
     self->floor_cost = neg_log(self->likelihood_threshold);
     tsls_hmm_next_stamp(self);
-    /* The forward algorithm starts from the uniform distribution over the
-     * nodes and the backward from 1. */
+    /* The forward algorithm starts from weight 1 / sample_size per node
+     * and the backward from 1. */
     ret = tsls_hmm_init_sweep(self, tp, position[first_site],
         mode == MODE_FORWARD ? 1.0 / tsls_hmm_get_n(self)
                              : (mode == MODE_VITERBI ? 0.0 : 1.0));

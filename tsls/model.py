@@ -2,10 +2,13 @@
 The likelihood model, and the thresholds that follow from it. See
 docs/likelihood_model.md for the derivations.
 
-At site j the HMM recombines with probability r_j, and then copies a node
-chosen uniformly from all n nodes of the tree sequence (the path ends if
-that node isn't in the tree). Otherwise it stays on the same node. A node
-copies the haplotype with probability 1 - (A_j - 1) mu_j for each of the
+At site j, switching to a particular node has weight r_j / n and staying
+on a continuously available node has weight 1 - r_j + r_j / n. Here n is
+the fixed haploid cohort sample size, including for ancestor matching.
+These are weights, whose row sums need not equal one when the number of
+copying states differs from n.
+
+A node copies the haplotype with probability 1 - (A_j - 1) mu_j for each of the
 A_j alleles at the site, and mismatches with probability mu_j for each other
 allele.
 
@@ -35,20 +38,22 @@ import numpy as np
 THRESHOLD_TOLERANCE = 1e-9
 
 
-def switch_odds(recombination, num_nodes):
+def switch_odds(recombination, sample_size):
     """
     Return the switch odds q of the specified recombination probability r:
-    q = (r / n) / (1 - r + r / n), with n = num_nodes.
+    q = (r / n) / (1 - r + r / n), with n = sample_size, the fixed haploid
+    cohort size, including for ancestor matching.
     """
     r = np.asarray(recombination, dtype=float)
-    return (r / num_nodes) / (1 - r + r / num_nodes)
+    return (r / sample_size) / (1 - r + r / sample_size)
 
 
-def recombination_probability(switch_odds, num_nodes):
+def recombination_probability(switch_odds, sample_size):
     """
     Return the recombination probability r that gives the specified switch
     odds q, the inverse of switch_odds: r = q n / (1 - q + q n), with
-    n = num_nodes. The odds must be between 0 and 1.
+    n = sample_size (the fixed haploid cohort size). The odds must be
+    between 0 and 1.
 
     As q n grows r approaches 1, and the engine computes 1 - r with a
     relative error of about 1e-16 / (1 - r).
@@ -61,7 +66,7 @@ def recombination_probability(switch_odds, num_nodes):
     q = np.asarray(switch_odds, dtype=float)
     if np.any(q < 0) or np.any(q > 1):
         raise ValueError("Switch odds must be between 0 and 1")
-    return q * num_nodes / (1 - q + q * num_nodes)
+    return q * sample_size / (1 - q + q * sample_size)
 
 
 def mismatch_odds(mismatch, num_alleles):
@@ -110,7 +115,7 @@ def path_threshold(
     *,
     num_switches=0,
     recombination=None,
-    num_nodes=None,
+    sample_size=None,
     tolerance=THRESHOLD_TOLERANCE,
 ):
     """
@@ -129,26 +134,27 @@ def path_threshold(
     If they are not, the run should be repeated with a lower threshold.
 
     The mismatch and recombination probabilities, and the number of
-    alleles, can be scalars or per-site arrays.
+    alleles, can be scalars or per-site arrays. sample_size is the same
+    fixed haploid cohort size supplied to Hmm.
     """
     if num_mismatches < 0 or num_switches < 0:
         raise ValueError("Numbers of mismatches and switches must be >= 0")
     t = _largest_product(mismatch_odds(mismatch, num_alleles), num_mismatches)
     if num_switches > 0:
-        if recombination is None or num_nodes is None:
-            raise ValueError("Switches need the recombination and num_nodes")
-        t *= _largest_product(switch_odds(recombination, num_nodes), num_switches)
+        if recombination is None or sample_size is None:
+            raise ValueError("Switches need the recombination and sample_size")
+        t *= _largest_product(switch_odds(recombination, sample_size), num_switches)
     return t * (1 - tolerance)
 
 
-def lossless_threshold(recombination, num_nodes, *, tolerance=THRESHOLD_TOLERANCE):
+def lossless_threshold(recombination, sample_size, *, tolerance=THRESHOLD_TOLERANCE):
     """
     Return the largest Viterbi prune threshold that changes no Viterbi
     values at later sites: below the smallest switch odds q, a node loses to
     recombination at the next site whatever its value. Reduced by tolerance
     for rounding.
     """
-    return float(np.min(switch_odds(recombination, num_nodes))) * (1 - tolerance)
+    return float(np.min(switch_odds(recombination, sample_size))) * (1 - tolerance)
 
 
 def read_genetic_map(path, positions):

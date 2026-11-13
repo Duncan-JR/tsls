@@ -205,6 +205,8 @@ typedef struct {
     const tsk_treeseq_t *tree_sequence;
     size_t num_nodes;
     size_t num_sites;
+    /* Fixed haploid cohort size used to scale recombination weights. */
+    size_t sample_size;
     const double *sites_position;
     double sequence_length;
     /* Input LS model rates */
@@ -367,8 +369,10 @@ int tsls_index_init(tsls_index_t *self, const tsk_treeseq_t *tree_sequence,
     const char **alleles, const tsk_size_t *num_site_alleles);
 int tsls_index_free(tsls_index_t *self);
 
+/* sample_size is the positive, fixed haploid cohort size, including when
+ * matching ancestors. It is independent of the number of copying nodes. */
 int tsls_hmm_alloc(tsls_hmm_t *self, const tsls_index_t *index,
-    const double *recombination_rate, const double *mismatch_rate,
+    const double *recombination_rate, const double *mismatch_rate, size_t sample_size,
     double likelihood_threshold, int flags);
 int tsls_hmm_set_relative_prune_threshold(tsls_hmm_t *self, double threshold);
 int tsls_hmm_set_prune_threshold(tsls_hmm_t *self, double threshold);

@@ -242,7 +242,7 @@ def model_rho(ts, rho, rate):
     """
     if rate == "probability":
         return rho
-    return tsls.recombination_probability(rho, ts.num_nodes)
+    return tsls.recombination_probability(rho, ts.num_samples)
 
 
 def queries(ts, A, present):
@@ -278,7 +278,7 @@ def make_matcher(ts, rho, mu, likelihood_threshold=None, prune_threshold=None):
         prune_threshold=prune_threshold,
         extended_checks=True,
     )
-    return am, ts.num_nodes
+    return am, ts.num_samples
 
 
 def path_by_site(ts, left, right, parent, start=0, end=None):
@@ -833,7 +833,7 @@ class TestPruning:
         ts = EXAMPLES[name]()
         A, present, continuous = dense.node_states(ts, ALLELES)
         rho, mu = model_rho(ts, 0.05, rate), 0.02
-        n = ts.num_nodes
+        n = ts.num_samples
         threshold = tsls.lossless_threshold(rho, n)
         m = ts.num_sites
         if kind == "floor":
@@ -1078,7 +1078,7 @@ class TestSparse:
         m = ts.num_sites
         rho = model_rho(ts, np.full(m, 0.02), rate)
         mu = np.full(m, 0.01)
-        n = ts.num_nodes
+        n = ts.num_samples
         sparse, full = self.matchers(ts, rho, mu, likelihood_threshold)
         num_sparse_sites = 0
         for h in noisy_queries(ts, A, present, seed):
@@ -1125,7 +1125,7 @@ class TestSparse:
                     args = (*window, cont, h[start:end], rho[start:end], mu[start:end])
                     values.append(
                         dense.path_log_likelihood(
-                            *args, len(ALLELES), ts.num_nodes, path
+                            *args, len(ALLELES), ts.num_samples, path
                         )
                     )
                 assert values[0] == pytest.approx(values[1], rel=1e-9)
@@ -1157,7 +1157,7 @@ class TestSparse:
             left, right, parent = am.find_path(h, 0, m, match)
             path = path_by_site(ts, left, right, parent)
             np.testing.assert_array_equal(match, A[np.arange(m), path])
-            args = (A, present, continuous, h, rho, mu, len(ALLELES), ts.num_nodes)
+            args = (A, present, continuous, h, rho, mu, len(ALLELES), ts.num_samples)
             value = dense.path_log_likelihood(*args, path)
             assert value == pytest.approx(dense.viterbi_log_likelihood(*args), rel=1e-9)
             num_sparse_sites += am.num_sparse_sites
@@ -1210,13 +1210,13 @@ class TestSparse:
                         rho,
                         mu,
                         len(ALLELES),
-                        ts.num_nodes,
+                        ts.num_samples,
                         path,
                     )
                 )
             assert values[0] == pytest.approx(values[1], rel=1e-9)
             optimum = dense.viterbi_log_likelihood(
-                A, present, continuous, h, rho, mu, len(ALLELES), ts.num_nodes
+                A, present, continuous, h, rho, mu, len(ALLELES), ts.num_samples
             )
             assert values[0] == pytest.approx(optimum, rel=1e-9)
 
@@ -1263,7 +1263,7 @@ class TestSparse:
             left, right, parent = am.find_path(h, 0, m, match)
             path = path_by_site(ts, left, right, parent)
             np.testing.assert_array_equal(match, A[np.arange(m), path])
-            args = (A, present, continuous, h, rho, mu, len(ALLELES), ts.num_nodes)
+            args = (A, present, continuous, h, rho, mu, len(ALLELES), ts.num_samples)
             value = dense.path_log_likelihood(*args, path)
             assert value == pytest.approx(dense.viterbi_log_likelihood(*args), rel=1e-9)
             num_sparse_sites += am.num_sparse_sites
@@ -1298,7 +1298,7 @@ class TestPerSiteRates:
             left, right, parent = am.find_path(h, 0, m, match)
             path = path_by_site(ts, left, right, parent)
             np.testing.assert_array_equal(match, A[np.arange(m), path])
-            args = (A, present, continuous, h, rho, mu, len(ALLELES), ts.num_nodes)
+            args = (A, present, continuous, h, rho, mu, len(ALLELES), ts.num_samples)
             value = dense.path_log_likelihood(*args, path)
             optimum = dense.viterbi_log_likelihood(*args)
             assert value == pytest.approx(optimum, rel=1e-9)
@@ -1317,7 +1317,7 @@ class TestPerSiteRates:
         for h in queries(ts, A, present):
             _, _, vm = am.viterbi_matrix(h)
             V, c = dense.viterbi_matrix(
-                A, present, continuous, h, rho, mu, len(ALLELES), ts.num_nodes
+                A, present, continuous, h, rho, mu, len(ALLELES), ts.num_samples
             )
             np.testing.assert_allclose(vm.normalisation_factor, c, rtol=1e-12)
             np.testing.assert_allclose(vm.decode(), V, rtol=1e-12, atol=1e-300)
@@ -1337,7 +1337,7 @@ class TestPerSiteRates:
             left, right, parent = am.find_path(h, 0, m, match)
             path = path_by_site(ts, left, right, parent)
             np.testing.assert_array_equal(match, A[np.arange(m), path])
-            args = (A, present, continuous, h, rho_a, mu_a, len(ALLELES), ts.num_nodes)
+            args = (A, present, continuous, h, rho_a, mu_a, len(ALLELES), ts.num_samples)
             value = dense.path_log_likelihood(*args, path)
             assert value == pytest.approx(dense.viterbi_log_likelihood(*args), rel=1e-9)
 
@@ -1404,7 +1404,7 @@ def check_against_dense(ts, h, rho, mu, *, rtol=1e-12):
     """
     A, present, continuous = dense.node_states(ts, ALLELES)
     m = ts.num_sites
-    n = ts.num_nodes
+    n = ts.num_samples
     rho_a = np.full(m, rho)
     mu_a = np.full(m, mu)
     am, _ = make_matcher(ts, rho, mu)
@@ -1537,7 +1537,7 @@ class TestMirroring:
             mts = mirror(ts)
             A, present, _ = dense.node_states(ts, ALLELES)
             m = ts.num_sites
-            n = ts.num_nodes
+            n = ts.num_samples
             for h in queries(ts, A, present):
                 posteriors = []
                 log_likelihoods = []
@@ -1564,7 +1564,7 @@ class TestMirroring:
             A, present, continuous = dense.node_states(ts, ALLELES)
             mA, mpresent, mcontinuous = dense.node_states(mts, ALLELES)
             m = ts.num_sites
-            n = ts.num_nodes
+            n = ts.num_samples
             rho_a = np.full(m, rho)
             mu_a = np.full(m, mu)
             for h in queries(ts, A, present):
@@ -1710,11 +1710,11 @@ class TestPerSiteAlleles:
         tts = tsls.TreeSequence(ts, alleles=lists)
         np.testing.assert_array_equal(tts.num_alleles, num_alleles)
         m = ts.num_sites
-        n = ts.num_nodes
+        n = ts.num_samples
         rho_a = np.full(m, rho)
         mu_a = np.full(m, mu)
         rng = np.random.default_rng(seed)
-        H = [A[:, u] for u in range(n) if np.all(present[:, u])][:3]
+        H = [A[:, u] for u in range(ts.num_nodes) if np.all(present[:, u])][:3]
         # Random haplotypes, including alleles that no node has at a site
         for _ in range(3):
             H.append((rng.random(m) * num_alleles).astype(np.int8))
@@ -1784,8 +1784,11 @@ class TestPerSiteAlleles:
             am = tsls.Hmm(ts, np.full(1, 0.1), np.full(1, mu), alleles=alleles)
             lls.append(am.forward_matrix(h).log_likelihood)
         # Every node (all of which are in the tree) mismatches, so the
-        # likelihood is that of a mismatch.
-        assert lls[0] == pytest.approx(np.log(mu))
+        # score includes the initial and transition weights as well as mu.
+        initial_total = ts.num_nodes / ts.num_samples
+        transition_total = 0.9 + 0.1 * initial_total
+        expected = np.log(mu * initial_total * transition_total)
+        assert lls[0] == pytest.approx(expected)
         assert lls[1] == pytest.approx(lls[0])
         # A match costs more with more alleles
         h = np.array([0], dtype=np.int8)
@@ -1889,7 +1892,7 @@ class TestConditioning:
                     np.full(4, 0.1),
                     np.full(4, 0.02),
                     len(ALLELES),
-                    panel.num_nodes,
+                    panel.num_samples,
                     donors,
                     4,
                     4,
@@ -1923,10 +1926,10 @@ class TestRegionalReuse:
         path = hmm.find_path(h, 0, 4, out)
         donors = path_by_site(panel, *path)
         expected = dense.viterbi_log_likelihood(
-            A, present, continuous, h, rho, mu, len(ALLELES), panel.num_nodes
+            A, present, continuous, h, rho, mu, len(ALLELES), panel.num_samples
         )
         observed = dense.path_log_likelihood(
-            A, present, continuous, h, rho, mu, len(ALLELES), panel.num_nodes, donors
+            A, present, continuous, h, rho, mu, len(ALLELES), panel.num_samples, donors
         )
         assert observed == pytest.approx(expected)
         assert hmm.num_sparse_sites > 0
