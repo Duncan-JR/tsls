@@ -531,6 +531,114 @@ out:
     return ret;
 }
 
+/* Independent regional calls share buffers and one GIL release. The rows are
+ * (start, end, initial_state, final_state), with TSK_NULL for unpinned ends. */
+static PyObject *
+Hmm_find_paths(Hmm *self, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = { "haplotype", "windows", "match_out", NULL };
+    PyObject *haplotype, *windows, *match_out, *ret = NULL;
+    PyArrayObject *h = NULL, *w = NULL, *match = NULL;
+    PyArrayObject *offsets = NULL, *left = NULL, *right = NULL, *parent = NULL;
+    npy_intp dims[1], capacity = 0, count, j;
+    int32_t *rows;
+    uint64_t *offset;
+    size_t num_edges = 0, total = 0;
+    int err = 0;
+
+    if (Hmm_check_state(self) != 0) {
+        goto out;
+    }
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "OOO", kwlist, &haplotype, &windows, &match_out)) {
+        goto out;
+    }
+    h = (PyArrayObject *) PyArray_FROM_OTF(haplotype, NPY_INT8, NPY_ARRAY_IN_ARRAY);
+    w = (PyArrayObject *) PyArray_FROM_OTF(windows, NPY_INT32, NPY_ARRAY_IN_ARRAY);
+    if (h == NULL || w == NULL) {
+        goto out;
+    }
+    if (PyArray_NDIM(h) != 1 || PyArray_DIM(h, 0) != (npy_intp) self->hmm->num_sites) {
+        PyErr_SetString(PyExc_ValueError, "Incorrect shape for input haplotype");
+        goto out;
+    }
+    if (PyArray_NDIM(w) != 2 || PyArray_DIM(w, 1) != 4) {
+        PyErr_SetString(PyExc_ValueError, "windows must have shape (n, 4)");
+        goto out;
+    }
+    if (!PyArray_Check(match_out)) {
+        PyErr_SetString(PyExc_ValueError, "match_out must be an array");
+        goto out;
+    }
+    match = (PyArrayObject *) match_out;
+    Py_INCREF(match);
+    if (PyArray_NDIM(match) != 1 || PyArray_TYPE(match) != NPY_INT8
+        || PyArray_DIM(match, 0) != (npy_intp) self->hmm->num_sites
+        || !PyArray_ISCARRAY(match)) {
+        PyErr_SetString(PyExc_ValueError,
+            "match_out must be a writable contiguous reference-length int8 array");
+        goto out;
+    }
+    count = PyArray_DIM(w, 0);
+    rows = PyArray_DATA(w);
+    for (j = 0; j < count; j++) {
+        int32_t *row = rows + 4 * j;
+        if (row[0] < 0 || row[1] > (int64_t) self->hmm->num_sites || row[0] >= row[1]) {
+            handle_library_error(TSLS_ERR_BAD_SITE_RANGE);
+            goto out;
+        }
+        if (capacity > NPY_MAX_INTP - (row[1] - row[0])) {
+            PyErr_NoMemory();
+            goto out;
+        }
+        capacity += row[1] - row[0];
+    }
+    dims[0] = count + 1;
+    offsets = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_UINT64);
+    dims[0] = capacity;
+    left = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_FLOAT64);
+    right = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_FLOAT64);
+    parent = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT32);
+    if (offsets == NULL || left == NULL || right == NULL || parent == NULL) {
+        goto out;
+    }
+    offset = PyArray_DATA(offsets);
+    offset[0] = 0;
+    Py_BEGIN_ALLOW_THREADS
+    for (j = 0; j < count; j++) {
+        int32_t *row = rows + 4 * j;
+        err = tsls_hmm_find_path(self->hmm, row[0], row[1], row[2], row[3],
+            PyArray_DATA(h), PyArray_DATA(match), &num_edges,
+            (double *) PyArray_DATA(left) + total,
+            (double *) PyArray_DATA(right) + total,
+            (tsk_id_t *) PyArray_DATA(parent) + total);
+        if (err != 0) {
+            break;
+        }
+        total += num_edges;
+        offset[j + 1] = total;
+    }
+    Py_END_ALLOW_THREADS
+    if (err != 0) {
+        handle_library_error(err);
+        goto out;
+    }
+    ret = Py_BuildValue("(NNNN)", offsets, left, right, parent);
+    offsets = NULL;
+    left = NULL;
+    right = NULL;
+    parent = NULL;
+out:
+    Py_XDECREF(h);
+    Py_XDECREF(w);
+    Py_XDECREF(match);
+    Py_XDECREF(offsets);
+    Py_XDECREF(left);
+    Py_XDECREF(right);
+    Py_XDECREF(parent);
+    return ret;
+}
+
 /* Return the compressed matrix as a tuple of flat arrays
  * (normalisation_factor, offsets, nodes, values[, flags]), where the values
  * at site j are values[offsets[j]: offsets[j + 1]] and similarly for nodes
@@ -939,6 +1047,8 @@ static PyGetSetDef Hmm_getsetters[] = {
 static PyMethodDef Hmm_methods[] = {
     { "find_path", (PyCFunction) Hmm_find_path, METH_VARARGS | METH_KEYWORDS,
         "Returns a best match path for the specified haplotype through the ancestors." },
+    { "find_paths", (PyCFunction) Hmm_find_paths, METH_VARARGS | METH_KEYWORDS,
+        "Run independent regional Viterbi calls in one batch." },
     { "viterbi_matrix", (PyCFunction) Hmm_viterbi_matrix, METH_VARARGS | METH_KEYWORDS,
         "Runs the Viterbi algorithm and also returns the compressed matrix of "
         "normalised values and recombination flags." },

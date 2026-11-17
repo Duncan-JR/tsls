@@ -367,6 +367,23 @@ class Hmm(_tsls.Hmm):
             match_out[:] = matched
         return left[:path_len], right[:path_len], parent[:path_len]
 
+    def find_paths(self, h, windows, match_out):
+        """Match independent windows with one native call.
+
+        Each int32 row of windows is (start, end, initial, final);
+        use -1 for an unpinned endpoint. Each window starts fresh likelihoods,
+        with the same semantics as find_path. Windows are processed
+        in their given order and only their matched alleles are written.
+        Overlapping output sites take the last window's value.
+
+        Return (offsets, left, right, parent). The path for row j is
+        left[offsets[j]:offsets[j + 1]] (and likewise right/parent),
+        in right-to-left order. An error may leave output from earlier rows.
+        """
+        offsets, left, right, parent = super().find_paths(h, windows, match_out)
+        size = int(offsets[-1])
+        return offsets, left[:size], right[:size], parent[:size]
+
     def viterbi_matrix(self, h, start=0, end=None):
         """
         Run the Viterbi algorithm on the haplotype h over sites [start, end)

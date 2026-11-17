@@ -32,6 +32,10 @@ the forward and backward algorithms (`forward_matrix`, `backward_matrix`),
 which return compressed matrices. Pass ``sample_size=n`` to keep the
 haploid cohort size fixed when matching ancestors or using a subset of the
 reference panel. By default it is the reference tree sequence's sample count.
+For independent regional matches, `find_paths(h, windows, match_out)` accepts
+an int32 array with columns `start, end, initial_state, final_state`; use -1 for
+unpinned endpoints. It returns offsets into concatenated path arrays. The batch
+retains topology and output buffers while resetting likelihoods for each window.
 See the docstrings for details.
 
 tsinfer and sc2ts trees have a vestigial root, node 0, whose only child is
