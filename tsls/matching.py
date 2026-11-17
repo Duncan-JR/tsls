@@ -368,7 +368,7 @@ class Hmm(_tsls.Hmm):
         return left[:path_len], right[:path_len], parent[:path_len]
 
     def find_paths(self, h, windows, match_out):
-        """Match independent windows with one native call.
+        """Match independent windows with the native regional strategy.
 
         Each int32 row of windows is (start, end, initial, final);
         use -1 for an unpinned endpoint. Each window starts fresh likelihoods,

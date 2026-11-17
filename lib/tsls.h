@@ -197,6 +197,17 @@ typedef struct {
     double current;
 } tsls_likelihood_t;
 
+/* Allocated only for regional calls; live membership and the visited union
+ * are maintained separately because traceback can make visited nodes inactive. */
+typedef struct {
+    tsk_id_t *live_nodes;
+    tsk_id_t *live_position;
+    int num_live_nodes;
+    tsk_id_t *visited_nodes;
+    bool *visited_mark;
+    int num_visited_nodes;
+} tsls_regional_workspace_t;
+
 /* The Li and Stephens HMM on a tree sequence. The index is borrowed, and
  * must not be changed or freed while the HMM is in use. */
 typedef struct {
@@ -238,6 +249,9 @@ typedef struct {
     /* The cursor and topology survive independent regional calls. */
     tsk_tree_position_t tree_position;
     bool topology_valid;
+    bool last_regional;
+    /* Owned, optional regional scratch. */
+    tsls_regional_workspace_t *regional;
     /* The per-node state, including the tree's parent links */
     tsls_node_t *tree;
     tsls_likelihood_t *likelihood;
@@ -381,6 +395,10 @@ int tsls_hmm_free(tsls_hmm_t *self);
 double tsls_hmm_get_mean_num_values(const tsls_hmm_t *self);
 double tsls_hmm_get_mean_num_updated(const tsls_hmm_t *self);
 int tsls_hmm_find_path(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
+    tsk_id_t initial_state, tsk_id_t final_state, const allele_t *haplotype,
+    allele_t *matched_haplotype, size_t *path_length, double *path_left,
+    double *path_right, tsk_id_t *path_parent);
+int tsls_hmm_find_path_regional(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     tsk_id_t initial_state, tsk_id_t final_state, const allele_t *haplotype,
     allele_t *matched_haplotype, size_t *path_length, double *path_left,
     double *path_right, tsk_id_t *path_parent);

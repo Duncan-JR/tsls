@@ -607,7 +607,7 @@ Hmm_find_paths(Hmm *self, PyObject *args, PyObject *kwds)
     Py_BEGIN_ALLOW_THREADS
     for (j = 0; j < count; j++) {
         int32_t *row = rows + 4 * j;
-        err = tsls_hmm_find_path(self->hmm, row[0], row[1], row[2], row[3],
+        err = tsls_hmm_find_path_regional(self->hmm, row[0], row[1], row[2], row[3],
             PyArray_DATA(h), PyArray_DATA(match), &num_edges,
             (double *) PyArray_DATA(left) + total,
             (double *) PyArray_DATA(right) + total,

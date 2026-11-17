@@ -939,12 +939,51 @@ out:
     return ret;
 }
 
+static void
+tsls_hmm_free_regional(tsls_hmm_t *self)
+{
+    tsls_regional_workspace_t *w = self->regional;
+
+    if (w != NULL) {
+        tsls_large_free_array(w->live_nodes, self->num_nodes);
+        tsls_large_free_array(w->live_position, self->num_nodes);
+        tsls_large_free_array(w->visited_nodes, self->num_nodes);
+        tsls_safe_free(w->visited_mark);
+        free(w);
+        self->regional = NULL;
+    }
+}
+
+static int WARN_UNUSED
+tsls_hmm_alloc_regional(tsls_hmm_t *self)
+{
+    const size_t N = self->num_nodes;
+    tsls_regional_workspace_t *w;
+
+    self->regional = calloc(1, sizeof(*self->regional));
+    w = self->regional;
+    if (w == NULL) {
+        return TSLS_ERR_NO_MEMORY;
+    }
+    w->live_nodes = tsls_large_alloc((N + 1) * sizeof(*w->live_nodes));
+    w->live_position = tsls_large_alloc((N + 1) * sizeof(*w->live_position));
+    w->visited_nodes = tsls_large_alloc((N + 1) * sizeof(*w->visited_nodes));
+    w->visited_mark = calloc(N + 1, sizeof(*w->visited_mark));
+    if (w->live_nodes == NULL || w->live_position == NULL || w->visited_nodes == NULL
+        || w->visited_mark == NULL) {
+        tsls_hmm_free_regional(self);
+        return TSLS_ERR_NO_MEMORY;
+    }
+    return 0;
+}
+
 int
 tsls_hmm_free(tsls_hmm_t *self)
 {
     tsk_tree_position_free(&self->tree_position);
     tsls_safe_free(self->recombination_rate);
     tsls_safe_free(self->mismatch_rate);
+    tsls_hmm_free_regional(self);
     tsls_large_free_array(self->tree, self->num_nodes);
     tsls_large_free_array(self->likelihood, self->num_nodes);
     tsls_large_free_array(self->num_children, self->num_nodes);
@@ -1262,14 +1301,47 @@ tsls_hmm_find_listed(tsls_hmm_t *self, tsk_id_t u)
     return a;
 }
 
+static ALWAYS_INLINE void
+tsls_hmm_track_visited(tsls_hmm_t *self, tsk_id_t u)
+{
+    tsls_regional_workspace_t *w = self->regional;
+
+    if (!w->visited_mark[u]) {
+        w->visited_mark[u] = true;
+        w->visited_nodes[w->num_visited_nodes++] = u;
+    }
+}
+
+/* Dense live membership uses swap removal; the visited union survives it. */
+static ALWAYS_INLINE void
+tsls_hmm_track_node(tsls_hmm_t *self, tsk_id_t u)
+{
+    tsls_regional_workspace_t *w = self->regional;
+    int offset = w->live_position[u];
+    tsk_id_t last;
+
+    if (tsls_hmm_in_tree(self, u)) {
+        if (offset == TSK_NULL) {
+            tsls_hmm_track_visited(self, u);
+            w->live_position[u] = w->num_live_nodes;
+            w->live_nodes[w->num_live_nodes++] = u;
+        }
+    } else if (offset != TSK_NULL) {
+        last = w->live_nodes[--w->num_live_nodes];
+        w->live_nodes[offset] = last;
+        w->live_position[last] = offset;
+        w->live_position[u] = TSK_NULL;
+    }
+}
+
 /* Remove the edge from p to c from the tree, and if update_likelihoods is
  * true make sure that the child keeps its likelihood. Nodes that are
  * isolated after removing the edge are added to the isolated list; they
  * only leave the tree if they are still isolated after all the edges at
  * this position have been inserted (see tsls_hmm_update_tree). */
-static inline void
+static ALWAYS_INLINE void
 tsls_hmm_remove_edge(tsls_hmm_t *self, tsk_id_t p, tsk_id_t c, bool update_likelihoods,
-    tsk_id_t *restrict isolated, int *num_isolated)
+    tsk_id_t *restrict isolated, int *num_isolated, const bool regional)
 {
     tsls_likelihood_t *restrict L = self->likelihood;
     tsk_id_t a;
@@ -1286,6 +1358,18 @@ tsls_hmm_remove_edge(tsls_hmm_t *self, tsk_id_t p, tsk_id_t c, bool update_likel
         L[c].current = L[a].current;
     }
     remove_edge(p, c, self->tree, self->num_children);
+    if (regional) {
+        tsls_hmm_track_node(self, p);
+        tsls_hmm_track_node(self, c);
+        if (!update_likelihoods) {
+            if (!tsls_hmm_in_tree(self, p)) {
+                self->tree[p].cache_stamp = 0;
+            }
+            if (!tsls_hmm_in_tree(self, c)) {
+                self->tree[c].cache_stamp = 0;
+            }
+        }
+    }
     /* c is now a root, and so has a likelihood, which walks over the
      * cache use in preference to any cached value */
     self->tree[c].allelic_state = ROOT_ALLELE;
@@ -1308,8 +1392,9 @@ tsls_hmm_remove_edge(tsls_hmm_t *self, tsk_id_t p, tsk_id_t c, bool update_likel
 /* Insert the edge from p to c into the tree. Nodes entering the tree get
  * likelihood 0 (in Viterbi, infinite cost, as of the last site), and so
  * can only be reached by recombination. */
-static inline void
-tsls_hmm_insert_edge(tsls_hmm_t *self, tsk_id_t p, tsk_id_t c, bool update_likelihoods)
+static ALWAYS_INLINE void
+tsls_hmm_insert_edge(tsls_hmm_t *self, tsk_id_t p, tsk_id_t c, bool update_likelihoods,
+    const bool regional)
 {
     tsls_likelihood_t *restrict L = self->likelihood;
     const double entering = self->mode == MODE_VITERBI ? INFINITY : 0;
@@ -1331,6 +1416,10 @@ tsls_hmm_insert_edge(tsls_hmm_t *self, tsk_id_t p, tsk_id_t c, bool update_likel
         assert(L[c].value >= 0);
     }
     insert_edge(p, c, self->tree, self->num_children);
+    if (regional) {
+        tsls_hmm_track_node(self, p);
+        tsls_hmm_track_node(self, c);
+    }
     self->tree[c].allelic_state = TSK_NULL;
     if (self->track_num_below) {
         tsls_hmm_update_num_below(self, p, self->num_below[c]);
@@ -1339,8 +1428,9 @@ tsls_hmm_insert_edge(tsls_hmm_t *self, tsk_id_t p, tsk_id_t c, bool update_likel
 
 /* Apply the edge removals and insertions recorded in the tree position,
  * which has just moved to the next tree in its direction of travel. */
-static void
-tsls_hmm_update_tree(tsls_hmm_t *self, const tsk_tree_position_t *tp)
+static ALWAYS_INLINE void
+tsls_hmm_update_tree(
+    tsls_hmm_t *self, const tsk_tree_position_t *tp, const bool regional)
 {
     tsls_likelihood_t *restrict L = self->likelihood;
     const tsls_edge_t *restrict out = tsls_index_get_edges(self->index, tp->out.order);
@@ -1354,10 +1444,10 @@ tsls_hmm_update_tree(tsls_hmm_t *self, const tsk_tree_position_t *tp)
     self->tree_numbered = false;
     for (j = tp->out.start; j != tp->out.stop; j += direction) {
         tsls_hmm_remove_edge(
-            self, out[j].parent, out[j].child, true, isolated, &num_isolated);
+            self, out[j].parent, out[j].child, true, isolated, &num_isolated, regional);
     }
     for (j = tp->in.start; j != tp->in.stop; j += direction) {
-        tsls_hmm_insert_edge(self, in[j].parent, in[j].child, true);
+        tsls_hmm_insert_edge(self, in[j].parent, in[j].child, true, regional);
     }
     /* Nodes that are still isolated have left the tree. Nodes that were
      * isolated and then inserted again keep their likelihoods. We mark the
@@ -1383,8 +1473,9 @@ static void tsls_hmm_clear_numbering(tsls_hmm_t *self);
 
 /* Position only the topology. Skipped spans have no observations, rates,
  * likelihood updates or traceback entries. Earlier trees use the cold path. */
-static int
-tsls_hmm_position_tree(tsls_hmm_t *self, tsk_tree_position_t *tp, double position)
+static ALWAYS_INLINE int
+tsls_hmm_position_tree(
+    tsls_hmm_t *self, tsk_tree_position_t *tp, double position, const bool regional)
 {
     const tsls_edge_t *in, *out;
     tsk_id_t j, u;
@@ -1400,17 +1491,27 @@ tsls_hmm_position_tree(tsls_hmm_t *self, tsk_tree_position_t *tp, double positio
             in = tsls_index_get_edges(self->index, tp->in.order);
             for (j = tp->out.start; j != tp->out.stop; j++) {
                 tsls_hmm_remove_edge(
-                    self, out[j].parent, out[j].child, false, NULL, NULL);
+                    self, out[j].parent, out[j].child, false, NULL, NULL, regional);
             }
             for (j = tp->in.start; j != tp->in.stop; j++) {
-                tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false);
+                tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false, regional);
             }
         }
     } else {
         tsk_tree_position_free(tp);
         tsk_tree_position_init(tp, self->tree_sequence, 0);
         memset(self->num_children, 0, self->num_nodes * sizeof(*self->num_children));
+        if (regional) {
+            memset(self->regional->live_position, 0xff,
+                self->num_nodes * sizeof(*self->regional->live_position));
+            self->regional->num_live_nodes = 0;
+        }
         for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
+            if (regional) {
+                self->likelihood[u].value = NOT_IN_TREE;
+                self->tree[u].cache_stamp = 0;
+                self->tree[u].traceback_flag = -1;
+            }
             self->tree[u].parent = NULL_NODE;
             self->tree[u].allelic_state = ROOT_ALLELE;
             self->num_below[u] = 1;
@@ -1422,7 +1523,7 @@ tsls_hmm_position_tree(tsls_hmm_t *self, tsk_tree_position_t *tp, double positio
         in = tsls_index_get_edges(self->index, tp->in.order);
         for (j = tp->in.start; j != tp->in.stop; j += tp->direction) {
             if (seek_edge_covers(tp, &in[j], position)) {
-                tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false);
+                tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false, regional);
             }
         }
     }
@@ -1430,15 +1531,73 @@ tsls_hmm_position_tree(tsls_hmm_t *self, tsk_tree_position_t *tp, double positio
     return 0;
 }
 
+static int
+compare_node_ids(const void *a, const void *b)
+{
+    tsk_id_t x = *(const tsk_id_t *) a;
+    tsk_id_t y = *(const tsk_id_t *) b;
+    return (x > y) - (x < y);
+}
+
+static void
+tsls_hmm_reset_visited(tsls_hmm_t *self)
+{
+    tsls_regional_workspace_t *w = self->regional;
+    tsk_id_t u;
+    int j;
+
+    for (j = 0; j < w->num_visited_nodes; j++) {
+        u = w->visited_nodes[j];
+        self->likelihood[u].value = NOT_IN_TREE;
+        self->tree[u].cache_stamp = 0;
+        self->tree[u].traceback_flag = -1;
+        w->visited_mark[u] = false;
+    }
+    w->num_visited_nodes = 0;
+}
+
+static void
+tsls_hmm_init_regional_nodes(tsls_hmm_t *self, double initial_value)
+{
+    tsls_regional_workspace_t *w = self->regional;
+    tsk_id_t u;
+    int j, roots = 0;
+
+    for (j = 0; j < w->num_live_nodes; j++) {
+        u = w->live_nodes[j];
+        tsls_hmm_track_visited(self, u);
+        self->tree[u].cache_stamp = 0;
+        self->tree[u].allelic_state
+            = self->tree[u].parent == NULL_NODE ? ROOT_ALLELE : TSK_NULL;
+        self->tree[u].recombination_required = -1;
+        self->tree[u].traceback_flag = -1;
+        self->likelihood[u].site = self->last_site;
+        self->likelihood[u].value = NULL_LIKELIHOOD;
+        if (self->tree[u].parent == NULL_NODE) {
+            self->likelihood_nodes_tmp[roots++] = u;
+        }
+    }
+    /* Match the normal ascending root order for deterministic ties. */
+    qsort(self->likelihood_nodes_tmp, roots, sizeof(tsk_id_t), compare_node_ids);
+    for (j = 0; j < roots; j++) {
+        u = self->likelihood_nodes_tmp[j];
+        tsls_hmm_add_likelihood(self, u, initial_value);
+        self->likelihood[u].current = initial_value;
+    }
+}
+
 /* Reset all probabilistic and walk state, retaining only topology. */
-static int WARN_UNUSED
-tsls_hmm_init_sweep(
-    tsls_hmm_t *self, tsk_tree_position_t *tp, double position, double initial_value)
+static ALWAYS_INLINE int WARN_UNUSED
+tsls_hmm_init_sweep(tsls_hmm_t *self, tsk_tree_position_t *tp, double position,
+    double initial_value, const bool regional)
 {
     int ret;
     tsk_id_t u;
 
-    ret = tsls_hmm_position_tree(self, tp, position);
+    if (regional) {
+        tsls_hmm_reset_visited(self);
+    }
+    ret = tsls_hmm_position_tree(self, tp, position, regional);
     if (ret != 0) {
         return ret;
     }
@@ -1446,6 +1605,10 @@ tsls_hmm_init_sweep(
     self->cache_stamp = 1;
     self->currents_stale = false;
     self->num_likelihood_nodes = 0;
+    if (regional) {
+        tsls_hmm_init_regional_nodes(self, initial_value);
+        return 0;
+    }
     for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
         self->tree[u].cache_stamp = 0;
         self->tree[u].allelic_state
@@ -1460,6 +1623,46 @@ tsls_hmm_init_sweep(
             self->likelihood[u].current = initial_value;
         } else {
             self->likelihood[u].value = NOT_IN_TREE;
+        }
+    }
+    return 0;
+}
+
+static int
+tsls_hmm_seed_initial_regional(tsls_hmm_t *self)
+{
+    tsk_id_t u, initial = self->initial_state;
+    int j, children = 0;
+
+    if (initial == NULL_NODE) {
+        return 0;
+    }
+    if (!tsls_hmm_in_tree(self, initial)) {
+        return TSLS_ERR_BAD_ENDPOINT;
+    }
+    for (j = 0; j < self->num_likelihood_nodes; j++) {
+        u = self->likelihood_nodes[j];
+        self->likelihood[u].value = INFINITY;
+        self->likelihood[u].current = INFINITY;
+    }
+    if (self->likelihood[initial].value < 0) {
+        tsls_hmm_add_likelihood(self, initial, 0);
+    } else {
+        self->likelihood[initial].value = 0;
+    }
+    self->likelihood[initial].current = 0;
+    if (self->num_children[initial] > 0) {
+        for (j = 0; j < self->regional->num_live_nodes; j++) {
+            u = self->regional->live_nodes[j];
+            if (self->tree[u].parent == initial) {
+                self->likelihood_nodes_tmp[children++] = u;
+            }
+        }
+        qsort(self->likelihood_nodes_tmp, children, sizeof(tsk_id_t), compare_node_ids);
+        for (j = 0; j < children; j++) {
+            u = self->likelihood_nodes_tmp[j];
+            tsls_hmm_add_likelihood(self, u, INFINITY);
+            self->likelihood[u].current = INFINITY;
         }
     }
     return 0;
@@ -2745,10 +2948,10 @@ tsls_hmm_next_stamp(tsls_hmm_t *self)
     self->current_stamp++;
 }
 
-static int WARN_UNUSED
+static ALWAYS_INLINE int WARN_UNUSED
 tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
     const allele_t *haplotype, const double *forward_normalisation_factor,
-    compressed_matrix_t *output)
+    compressed_matrix_t *output, const bool regional)
 {
     int ret = 0;
     tsk_tree_position_t *tp = &self->tree_position;
@@ -2765,9 +2968,10 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
     bool valid, new_tree;
     int handled;
 
-    if (mode != MODE_VITERBI) {
+    if (mode != MODE_VITERBI || self->last_regional != regional) {
         self->topology_valid = false;
     }
+    self->last_regional = regional;
     self->mode = mode;
     self->stats_num_sites = 0;
     self->stats_total_values = 0;
@@ -2801,12 +3005,14 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
      * and the backward from 1. */
     ret = tsls_hmm_init_sweep(self, tp, position[first_site],
         mode == MODE_FORWARD ? 1.0 / tsls_hmm_get_n(self)
-                             : (mode == MODE_VITERBI ? 0.0 : 1.0));
+                             : (mode == MODE_VITERBI ? 0.0 : 1.0),
+        regional);
     if (ret != 0) {
         goto out;
     }
     if (mode == MODE_VITERBI) {
-        ret = tsls_hmm_seed_initial_state(self);
+        ret = regional ? tsls_hmm_seed_initial_regional(self)
+                       : tsls_hmm_seed_initial_state(self);
         if (ret != 0) {
             goto out;
         }
@@ -2821,7 +3027,7 @@ tsls_hmm_run(tsls_hmm_t *self, int mode, tsk_id_t start, tsk_id_t end,
                                   : tsk_tree_position_prev(tp);
             assert(valid);
             (void) valid;
-            tsls_hmm_update_tree(self, tp);
+            tsls_hmm_update_tree(self, tp, regional);
             new_tree = true;
         }
         if (mode == MODE_VITERBI && site == end - 1 && self->final_state != NULL_NODE
@@ -2932,10 +3138,10 @@ tsls_hmm_undo_traceback_entries(tsls_hmm_t *self, const traceback_delta_t *delta
  * last changed to, at a site s, lowered by any smaller ceiling since: so
  * the flag is C >= ceiling[j] and no ceiling after s and before j is
  * smaller than ceiling[j] (ceiling_pse[j] <= s). */
-static int WARN_UNUSED
+static ALWAYS_INLINE int WARN_UNUSED
 tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     allele_t *restrict match, size_t *path_length_out, double *restrict path_left,
-    double *restrict path_right, tsk_id_t *restrict path_parent)
+    double *restrict path_right, tsk_id_t *restrict path_parent, const bool regional)
 {
     int ret = 0;
     tsk_tree_position_t *tp = &self->tree_position;
@@ -2968,8 +3174,14 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     path_parent[path_length] = max_likelihood_node;
 
     /* The forward pass already left the cursor at the final site's tree. */
-    for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
-        tree[u].traceback_flag = L[u].value >= 0 ? 1 : -1;
+    if (regional) {
+        for (j = 0; j < self->num_likelihood_nodes; j++) {
+            tree[self->likelihood_nodes[j]].traceback_flag = 1;
+        }
+    } else {
+        for (u = 0; u < (tsk_id_t) self->num_nodes; u++) {
+            tree[u].traceback_flag = L[u].value >= 0 ? 1 : -1;
+        }
     }
     for (site = end - 1; site >= start; site--) {
         while (sites_position[site] < tp->interval.left) {
@@ -2980,10 +3192,10 @@ tsls_hmm_run_traceback(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
             in = tsls_index_get_edges(self->index, tp->in.order);
             for (j = tp->out.start; j != tp->out.stop; j--) {
                 tsls_hmm_remove_edge(
-                    self, out[j].parent, out[j].child, false, NULL, NULL);
+                    self, out[j].parent, out[j].child, false, NULL, NULL, regional);
             }
             for (j = tp->in.start; j != tp->in.stop; j--) {
-                tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false);
+                tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false, regional);
             }
         }
         tsls_hmm_set_allelic_state(self, site);
@@ -3078,11 +3290,12 @@ out:
  * normalised values and recombination_required flags stored in the
  * traceback at each site are also stored in output, with the maximum
  * likelihood (before normalisation) as the normalisation factor. */
-int
-tsls_hmm_find_path_matrix(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
+static ALWAYS_INLINE int
+tsls_hmm_find_path_checked(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     tsk_id_t initial_state, tsk_id_t final_state, const allele_t *haplotype,
     allele_t *matched_haplotype, size_t *path_length, double *path_left,
-    double *path_right, tsk_id_t *path_parent, compressed_matrix_t *output)
+    double *path_right, tsk_id_t *path_parent, compressed_matrix_t *output,
+    const bool regional)
 {
     int ret = 0;
     bool valid_window = false;
@@ -3112,12 +3325,19 @@ tsls_hmm_find_path_matrix(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
     if (ret != 0) {
         goto out;
     }
-    ret = tsls_hmm_run(self, MODE_VITERBI, start, end, haplotype, NULL, output);
+    if (regional && self->regional == NULL) {
+        ret = tsls_hmm_alloc_regional(self);
+        if (ret != 0) {
+            goto out;
+        }
+    }
+    ret = tsls_hmm_run(
+        self, MODE_VITERBI, start, end, haplotype, NULL, output, regional);
     if (ret != 0) {
         goto out;
     }
     ret = tsls_hmm_run_traceback(self, start, end, matched_haplotype, path_length,
-        path_left, path_right, path_parent);
+        path_left, path_right, path_parent, regional);
 out:
     if (ret != 0) {
         self->topology_valid = false;
@@ -3132,6 +3352,28 @@ out:
             (size_t) (end - start) * sizeof(*self->max_likelihood_node));
     }
     return ret;
+}
+
+int
+tsls_hmm_find_path_matrix(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
+    tsk_id_t initial_state, tsk_id_t final_state, const allele_t *haplotype,
+    allele_t *matched_haplotype, size_t *path_length, double *path_left,
+    double *path_right, tsk_id_t *path_parent, compressed_matrix_t *output)
+{
+    return tsls_hmm_find_path_checked(self, start, end, initial_state, final_state,
+        haplotype, matched_haplotype, path_length, path_left, path_right, path_parent,
+        output, false);
+}
+
+int
+tsls_hmm_find_path_regional(tsls_hmm_t *self, tsk_id_t start, tsk_id_t end,
+    tsk_id_t initial_state, tsk_id_t final_state, const allele_t *haplotype,
+    allele_t *matched_haplotype, size_t *path_length, double *path_left,
+    double *path_right, tsk_id_t *path_parent)
+{
+    return tsls_hmm_find_path_checked(self, start, end, initial_state, final_state,
+        haplotype, matched_haplotype, path_length, path_left, path_right, path_parent,
+        NULL, true);
 }
 
 int
@@ -3158,8 +3400,8 @@ tsls_hmm_forward(
         goto out;
     }
     if (self->num_sites > 0) {
-        ret = tsls_hmm_run(
-            self, MODE_FORWARD, 0, (tsk_id_t) self->num_sites, haplotype, NULL, output);
+        ret = tsls_hmm_run(self, MODE_FORWARD, 0, (tsk_id_t) self->num_sites, haplotype,
+            NULL, output, false);
     }
 out:
     return ret;
@@ -3186,7 +3428,7 @@ tsls_hmm_backward(tsls_hmm_t *self, const allele_t *haplotype,
     }
     if (self->num_sites > 0) {
         ret = tsls_hmm_run(self, MODE_BACKWARD, 0, (tsk_id_t) self->num_sites, haplotype,
-            forward_normalisation_factor, output);
+            forward_normalisation_factor, output, false);
     }
 out:
     return ret;
