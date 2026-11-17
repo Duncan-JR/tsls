@@ -1471,6 +1471,41 @@ tsls_hmm_update_tree(
 
 static void tsls_hmm_clear_numbering(tsls_hmm_t *self);
 
+static int WARN_UNUSED
+tsls_hmm_seek_regional(tsls_hmm_t *self, tsk_tree_position_t *tp, double position)
+{
+    const double old_right = tp->interval.right;
+    const tsk_treeseq_t *ts = self->tree_sequence;
+    const tsls_edge_t *in, *out;
+    tsk_id_t j, index;
+    int ret;
+
+    index = (tsk_id_t) tsk_search_sorted(ts->breakpoints, ts->num_trees + 1, position);
+    if (ts->breakpoints[index] > position) {
+        index--;
+    }
+    ret = tsk_tree_position_seek_forward(tp, index);
+    if (ret != 0) {
+        return ret;
+    }
+    out = tsls_index_get_edges(self->index, tp->out.order);
+    in = tsls_index_get_edges(self->index, tp->in.order);
+    /* Seek ranges include skipped edges: remove only edges in the old tree
+     * and insert only edges covering the target, preserving index order. */
+    for (j = tp->out.start; j != tp->out.stop; j++) {
+        if (out[j].coordinate < old_right) {
+            tsls_hmm_remove_edge(
+                self, out[j].parent, out[j].child, false, NULL, NULL, true);
+        }
+    }
+    for (j = tp->in.start; j != tp->in.stop; j++) {
+        if (seek_edge_covers(tp, &in[j], position)) {
+            tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false, true);
+        }
+    }
+    return 0;
+}
+
 /* Position only the topology. Skipped spans have no observations, rates,
  * likelihood updates or traceback entries. Earlier trees use the cold path. */
 static ALWAYS_INLINE int
@@ -1483,18 +1518,28 @@ tsls_hmm_position_tree(
     bool valid;
 
     if (self->topology_valid && position >= tp->interval.left) {
-        while (position >= tp->interval.right) {
-            valid = tsk_tree_position_next(tp);
-            assert(valid);
-            (void) valid;
-            out = tsls_index_get_edges(self->index, tp->out.order);
-            in = tsls_index_get_edges(self->index, tp->in.order);
-            for (j = tp->out.start; j != tp->out.stop; j++) {
-                tsls_hmm_remove_edge(
-                    self, out[j].parent, out[j].child, false, NULL, NULL, regional);
+        if (regional) {
+            if (position >= tp->interval.right) {
+                ret = tsls_hmm_seek_regional(self, tp, position);
+                if (ret != 0) {
+                    return ret;
+                }
             }
-            for (j = tp->in.start; j != tp->in.stop; j++) {
-                tsls_hmm_insert_edge(self, in[j].parent, in[j].child, false, regional);
+        } else {
+            while (position >= tp->interval.right) {
+                valid = tsk_tree_position_next(tp);
+                assert(valid);
+                (void) valid;
+                out = tsls_index_get_edges(self->index, tp->out.order);
+                in = tsls_index_get_edges(self->index, tp->in.order);
+                for (j = tp->out.start; j != tp->out.stop; j++) {
+                    tsls_hmm_remove_edge(
+                        self, out[j].parent, out[j].child, false, NULL, NULL, regional);
+                }
+                for (j = tp->in.start; j != tp->in.stop; j++) {
+                    tsls_hmm_insert_edge(
+                        self, in[j].parent, in[j].child, false, regional);
+                }
             }
         }
     } else {
